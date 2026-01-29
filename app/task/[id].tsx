@@ -7,7 +7,7 @@
  * - Delete
  */
 
-import { View, StyleSheet, ScrollView, Alert } from "react-native";
+import { View, StyleSheet, ScrollView, Alert, TextInput as RNTextInput } from "react-native";
 import {
   Text,
   Button,
@@ -17,6 +17,8 @@ import {
   IconButton,
   Divider,
   ActivityIndicator,
+  Checkbox,
+  TextInput,
 } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useState, useEffect, useCallback } from "react";
@@ -31,6 +33,12 @@ import {
   updateGoogleCalendarEvent,
   deleteGoogleCalendarEvent,
 } from "@/lib/google-calendar";
+import { scheduleTaskReminder, cancelTaskReminder } from "@/lib/notifications";
+import {
+  generateNextInstance,
+  isRecurringInstance,
+  getRecurrenceDescription,
+} from "@/lib/recurrence";
 
 export default function TaskDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -40,8 +48,14 @@ export default function TaskDetailScreen() {
     router.replace("/(tabs)/home");
   };
   const [task, setTask] = useState<Task | null>(null);
+  const [subtasks, setSubtasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+
+  // Subtask state
+  const [showAddSubtask, setShowAddSubtask] = useState(false);
+  const [newSubtaskTitle, setNewSubtaskTitle] = useState("");
+  const [addingSubtask, setAddingSubtask] = useState(false);
 
   // Reschedule modal state
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
@@ -73,6 +87,17 @@ export default function TaskDetailScreen() {
 
       if (error) throw error;
       setTask(data as Task);
+
+      // If this is a parent task, load subtasks
+      if (!data.parent_task_id) {
+        const { data: subtaskData } = await supabase
+          .from("tasks")
+          .select("*")
+          .eq("parent_task_id", id)
+          .order("subtask_order", { ascending: true });
+
+        setSubtasks((subtaskData || []) as Task[]);
+      }
     } catch (err) {
       console.error("[TaskDetail] Load error:", err);
       Alert.alert("Error", "Failed to load task");
@@ -88,12 +113,37 @@ export default function TaskDetailScreen() {
     try {
       setActionLoading(true);
 
+      // Cancel any scheduled notification
+      await cancelTaskReminder(task.id);
+
       const { error } = await supabase
         .from("tasks")
         .update({ status: "completed" })
         .eq("id", task.id);
 
       if (error) throw error;
+
+      // If this is a recurring task instance, generate the next instance
+      if (isRecurringInstance(task)) {
+        // Fetch the parent recurring task
+        const { data: parentTask } = await supabase
+          .from("tasks")
+          .select("*")
+          .eq("id", task.recurrence_parent_id)
+          .single();
+
+        if (parentTask) {
+          const nextInstance = generateNextInstance(
+            parentTask as Task,
+            task.instance_date
+          );
+
+          if (nextInstance) {
+            await supabase.from("tasks").insert(nextInstance);
+            console.log("[TaskDetail] Generated next recurring instance");
+          }
+        }
+      }
 
       // Go back after completing
       goBack();
@@ -125,6 +175,9 @@ export default function TaskDetailScreen() {
 
     try {
       setActionLoading(true);
+
+      // Cancel any scheduled notification
+      await cancelTaskReminder(task.id);
 
       // Delete Google Calendar event if exists
       if (task.google_event_id) {
@@ -162,6 +215,94 @@ export default function TaskDetailScreen() {
     } else {
       await loadBusySlots();
     }
+  };
+
+  // Subtask functions
+  const handleAddSubtask = async () => {
+    if (!task || !newSubtaskTitle.trim()) return;
+
+    try {
+      setAddingSubtask(true);
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
+
+      const newSubtask = {
+        user_id: user.id,
+        title: newSubtaskTitle.trim(),
+        parent_task_id: task.id,
+        subtask_order: subtasks.length,
+        duration_minutes: 15, // Default 15 min for subtasks
+        priority: task.priority,
+        scheduling_method: "MANUAL",
+        auto_reschedule: false,
+        status: "pending_schedule",
+      };
+
+      const { data, error } = await supabase
+        .from("tasks")
+        .insert(newSubtask)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      setSubtasks([...subtasks, data as Task]);
+      setNewSubtaskTitle("");
+      setShowAddSubtask(false);
+    } catch (err) {
+      console.error("[TaskDetail] Add subtask error:", err);
+      Alert.alert("Error", "Failed to add subtask");
+    } finally {
+      setAddingSubtask(false);
+    }
+  };
+
+  const handleToggleSubtask = async (subtask: Task) => {
+    try {
+      const newStatus = subtask.status === "completed" ? "pending_schedule" : "completed";
+
+      const { error } = await supabase
+        .from("tasks")
+        .update({ status: newStatus })
+        .eq("id", subtask.id);
+
+      if (error) throw error;
+
+      // Update local state
+      const updatedSubtasks = subtasks.map((s) =>
+        s.id === subtask.id ? { ...s, status: newStatus as Task["status"] } : s
+      );
+      setSubtasks(updatedSubtasks);
+
+      // Check if all subtasks are complete
+      const allComplete = updatedSubtasks.every((s) => s.status === "completed");
+      if (allComplete && updatedSubtasks.length > 0 && task?.status !== "completed") {
+        // Auto-complete parent
+        await supabase
+          .from("tasks")
+          .update({ status: "completed" })
+          .eq("id", task!.id);
+
+        setTask({ ...task!, status: "completed" });
+      }
+    } catch (err) {
+      console.error("[TaskDetail] Toggle subtask error:", err);
+      Alert.alert("Error", "Failed to update subtask");
+    }
+  };
+
+  const getSubtaskProgress = () => {
+    if (subtasks.length === 0) return 0;
+    const completed = subtasks.filter((s) => s.status === "completed").length;
+    return completed / subtasks.length;
+  };
+
+  const getSubtaskProgressText = () => {
+    const completed = subtasks.filter((s) => s.status === "completed").length;
+    return `${completed}/${subtasks.length} complete`;
   };
 
   const runSmartReschedule = async () => {
@@ -322,12 +463,19 @@ export default function TaskDetailScreen() {
         updateData.google_event_id = googleEventId;
       }
 
-      const { error } = await supabase
+      const { data: updatedTask, error } = await supabase
         .from("tasks")
         .update(updateData)
-        .eq("id", task.id);
+        .eq("id", task.id)
+        .select()
+        .single();
 
       if (error) throw error;
+
+      // Schedule notification reminder for new time
+      if (updatedTask) {
+        await scheduleTaskReminder(updatedTask as Task);
+      }
 
       setShowRescheduleModal(false);
       loadTask(); // Reload task with new time
@@ -467,6 +615,18 @@ export default function TaskDetailScreen() {
               {task.priority.charAt(0).toUpperCase() + task.priority.slice(1)}{" "}
               Priority
             </Chip>
+            {/* Recurring indicator */}
+            {(task.is_recurring || isRecurringInstance(task)) && (
+              <Chip
+                icon="repeat"
+                style={[styles.chip, { backgroundColor: "#e0f2fe" }]}
+                textStyle={{ color: "#0369a1" }}
+              >
+                {task.recurrence_rule
+                  ? getRecurrenceDescription(task.recurrence_rule)
+                  : "Recurring"}
+              </Chip>
+            )}
           </View>
         </View>
 
@@ -532,6 +692,98 @@ export default function TaskDetailScreen() {
             </Text>
           </View>
         </Surface>
+
+        {/* Subtasks Section - only show for parent tasks */}
+        {!task.parent_task_id && (
+          <Surface style={styles.card} elevation={1}>
+            <View style={styles.subtaskHeader}>
+              <Text variant="titleSmall" style={styles.cardTitle}>
+                Subtasks
+              </Text>
+              {subtasks.length > 0 && (
+                <Text style={styles.subtaskProgress}>{getSubtaskProgressText()}</Text>
+              )}
+            </View>
+
+            {/* Progress bar */}
+            {subtasks.length > 0 && (
+              <ProgressBar
+                progress={getSubtaskProgress()}
+                color="#4caf50"
+                style={styles.progressBar}
+              />
+            )}
+
+            {/* Subtask list */}
+            {subtasks.map((subtask) => (
+              <View key={subtask.id} style={styles.subtaskItem}>
+                <Checkbox
+                  status={subtask.status === "completed" ? "checked" : "unchecked"}
+                  onPress={() => handleToggleSubtask(subtask)}
+                />
+                <Text
+                  style={[
+                    styles.subtaskTitle,
+                    subtask.status === "completed" && styles.subtaskCompleted,
+                  ]}
+                  onPress={() => router.push(`/task/${subtask.id}`)}
+                >
+                  {subtask.title}
+                </Text>
+              </View>
+            ))}
+
+            {/* Add subtask input */}
+            {showAddSubtask ? (
+              <View style={styles.addSubtaskContainer}>
+                <TextInput
+                  mode="outlined"
+                  placeholder="Subtask title"
+                  value={newSubtaskTitle}
+                  onChangeText={setNewSubtaskTitle}
+                  style={styles.addSubtaskInput}
+                  dense
+                  autoFocus
+                  onSubmitEditing={handleAddSubtask}
+                />
+                <View style={styles.addSubtaskButtons}>
+                  <Button
+                    mode="text"
+                    onPress={() => {
+                      setShowAddSubtask(false);
+                      setNewSubtaskTitle("");
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    mode="contained"
+                    onPress={handleAddSubtask}
+                    loading={addingSubtask}
+                    disabled={!newSubtaskTitle.trim() || addingSubtask}
+                  >
+                    Add
+                  </Button>
+                </View>
+              </View>
+            ) : (
+              <Button
+                mode="text"
+                icon="plus"
+                onPress={() => setShowAddSubtask(true)}
+                style={styles.addSubtaskButton}
+              >
+                Add Subtask
+              </Button>
+            )}
+
+            {subtasks.length === 0 && !showAddSubtask && (
+              <Text style={styles.noSubtasks}>
+                Break this task into smaller steps
+              </Text>
+            )}
+          </Surface>
+        )}
 
         {/* Actions */}
         <View style={styles.actions}>
@@ -633,7 +885,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   chip: {
-    height: 28,
+    height: "auto",
+    maxWidth: "100%",
   },
   card: {
     backgroundColor: "#fff",
@@ -696,5 +949,56 @@ const styles = StyleSheet.create({
   completedText: {
     color: "#4caf50",
     fontWeight: "500",
+  },
+  // Subtask styles
+  subtaskHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  subtaskProgress: {
+    fontSize: 12,
+    color: "#666",
+  },
+  progressBar: {
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 12,
+  },
+  subtaskItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 4,
+  },
+  subtaskTitle: {
+    flex: 1,
+    fontSize: 14,
+    color: "#333",
+  },
+  subtaskCompleted: {
+    textDecorationLine: "line-through",
+    color: "#999",
+  },
+  addSubtaskContainer: {
+    marginTop: 8,
+  },
+  addSubtaskInput: {
+    backgroundColor: "#fff",
+  },
+  addSubtaskButtons: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 8,
+  },
+  addSubtaskButton: {
+    marginTop: 8,
+  },
+  noSubtasks: {
+    fontSize: 13,
+    color: "#999",
+    textAlign: "center",
+    paddingVertical: 12,
   },
 });

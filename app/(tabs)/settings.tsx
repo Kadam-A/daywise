@@ -4,7 +4,7 @@
  * User preferences and account management
  */
 
-import { View, StyleSheet, ScrollView, Alert } from "react-native";
+import { View, StyleSheet, ScrollView, Alert, Pressable } from "react-native";
 import {
   Text,
   List,
@@ -23,10 +23,18 @@ import { router } from "expo-router";
 import { useState, useEffect } from "react";
 import { supabase, signOut } from "@/lib/supabase";
 import { useGoogleCalendarAuth } from "@/lib/google-calendar";
+import {
+  requestNotificationPermissions,
+  areNotificationsEnabled,
+  setNotificationsEnabled as setNotificationsEnabledStorage,
+  getReminderMinutes,
+  setReminderMinutes,
+} from "@/lib/notifications";
 import { format } from "date-fns";
 
 export default function SettingsScreen() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [reminderTime, setReminderTime] = useState(15);
   const [displayName, setDisplayName] = useState<string>("");
   const [email, setEmail] = useState<string>("");
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -39,6 +47,9 @@ export default function SettingsScreen() {
   const [workEndHour, setWorkEndHour] = useState(20);
   const [savingWorkHours, setSavingWorkHours] = useState(false);
 
+  // Reminder time modal
+  const [reminderModalVisible, setReminderModalVisible] = useState(false);
+
   // Google Calendar state
   const {
     isConnected: isCalendarConnected,
@@ -50,10 +61,51 @@ export default function SettingsScreen() {
     isReady: isCalendarReady,
   } = useGoogleCalendarAuth();
 
-  // Load user profile on mount
+  // Load user profile and notification settings on mount
   useEffect(() => {
     loadProfile();
+    loadNotificationSettings();
   }, []);
+
+  const loadNotificationSettings = async () => {
+    try {
+      const enabled = await areNotificationsEnabled();
+      const minutes = await getReminderMinutes();
+      setNotificationsEnabled(enabled);
+      setReminderTime(minutes);
+    } catch (error) {
+      console.error("[Settings] Error loading notification settings:", error);
+    }
+  };
+
+  const handleNotificationsToggle = async (enabled: boolean) => {
+    try {
+      if (enabled) {
+        // Request permission first
+        const granted = await requestNotificationPermissions();
+        if (!granted) {
+          Alert.alert(
+            "Permission Required",
+            "Please enable notifications in your device settings to receive task reminders."
+          );
+          return;
+        }
+      }
+      await setNotificationsEnabledStorage(enabled);
+      setNotificationsEnabled(enabled);
+    } catch (error) {
+      console.error("[Settings] Error toggling notifications:", error);
+    }
+  };
+
+  const handleSaveReminderTime = async () => {
+    try {
+      await setReminderMinutes(reminderTime);
+      setReminderModalVisible(false);
+    } catch (error) {
+      console.error("[Settings] Error saving reminder time:", error);
+    }
+  };
 
   const loadProfile = async () => {
     try {
@@ -288,10 +340,19 @@ export default function SettingsScreen() {
             right={() => (
               <Switch
                 value={notificationsEnabled}
-                onValueChange={setNotificationsEnabled}
+                onValueChange={handleNotificationsToggle}
               />
             )}
           />
+          {notificationsEnabled && (
+            <List.Item
+              title="Reminder Time"
+              description={`${reminderTime} minutes before task`}
+              left={(props) => <List.Icon {...props} icon="alarm" />}
+              right={(props) => <List.Icon {...props} icon="chevron-right" />}
+              onPress={() => setReminderModalVisible(true)}
+            />
+          )}
           <List.Item
             title="Work Hours"
             description={`${formatHourDisplay(workStartHour)} - ${formatHourDisplay(workEndHour)}`}
@@ -529,6 +590,61 @@ export default function SettingsScreen() {
           </View>
         </Modal>
       </Portal>
+
+      {/* Reminder Time Modal */}
+      <Portal>
+        <Modal
+          visible={reminderModalVisible}
+          onDismiss={() => setReminderModalVisible(false)}
+          contentContainerStyle={styles.modalContainer}
+        >
+          <Text variant="titleLarge" style={styles.modalTitle}>
+            Reminder Time
+          </Text>
+          <Text variant="bodyMedium" style={styles.workHoursHint}>
+            How many minutes before a task should you be reminded?
+          </Text>
+
+          <View style={styles.reminderOptions}>
+            {[5, 10, 15, 30, 60].map((minutes) => (
+              <Pressable
+                key={minutes}
+                style={[
+                  styles.reminderOption,
+                  reminderTime === minutes && styles.reminderOptionSelected,
+                ]}
+                onPress={() => setReminderTime(minutes)}
+              >
+                <Text
+                  style={[
+                    styles.reminderOptionText,
+                    reminderTime === minutes && styles.reminderOptionTextSelected,
+                  ]}
+                >
+                  {minutes < 60 ? `${minutes} min` : "1 hour"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <View style={styles.modalButtons}>
+            <Button
+              mode="outlined"
+              onPress={() => setReminderModalVisible(false)}
+              style={styles.modalButton}
+            >
+              Cancel
+            </Button>
+            <Button
+              mode="contained"
+              onPress={handleSaveReminderTime}
+              style={styles.modalButton}
+            >
+              Save
+            </Button>
+          </View>
+        </Modal>
+      </Portal>
     </SafeAreaView>
   );
 }
@@ -634,5 +750,31 @@ const styles = StyleSheet.create({
   },
   disconnectText: {
     color: "#ef4444",
+  },
+  reminderOptions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 24,
+  },
+  reminderOption: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#ffffff",
+  },
+  reminderOptionSelected: {
+    borderColor: "#2563eb",
+    backgroundColor: "#eff6ff",
+  },
+  reminderOptionText: {
+    color: "#64748b",
+    fontSize: 14,
+  },
+  reminderOptionTextSelected: {
+    color: "#2563eb",
+    fontWeight: "600",
   },
 });

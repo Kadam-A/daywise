@@ -11,9 +11,13 @@ import { useState, useEffect, useCallback } from "react";
 import * as AuthSession from "expo-auth-session";
 import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
+import Constants from "expo-constants";
 import { Platform } from "react-native";
 import { GoogleCalendarTokens, GoogleCalendarEvent, CalendarEvent } from "./types";
 import { supabase } from "./supabase";
+
+// Check if running in Expo Go
+const isExpoGo = Constants.appOwnership === "expo";
 
 // Complete the auth session when returning to the app
 WebBrowser.maybeCompleteAuthSession();
@@ -42,6 +46,14 @@ function getClientId(): string {
   return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_WEB || "";
 }
 
+// Get client secret (only needed for web)
+function getClientSecret(): string | undefined {
+  if (Platform.OS === "web") {
+    return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_SECRET_WEB;
+  }
+  return undefined;
+}
+
 // Storage keys
 const STORAGE_KEYS = {
   accessToken: "google_access_token",
@@ -60,10 +72,16 @@ export function useGoogleCalendarAuth() {
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
 
   const clientId = getClientId();
-  const redirectUri = AuthSession.makeRedirectUri({
-    scheme: "tailoredtime",
-    path: "oauth",
-  });
+
+  // In Expo Go, use the auth proxy (no scheme). In dev builds, use custom scheme.
+  const redirectUri = isExpoGo
+    ? AuthSession.makeRedirectUri({ path: "oauth" })
+    : AuthSession.makeRedirectUri({ scheme: "tailoredtime", path: "oauth" });
+
+  // Debug: Log the redirect URI being used
+  console.log("[GoogleCalendar] Running in Expo Go:", isExpoGo);
+  console.log("[GoogleCalendar] Client ID:", clientId ? "SET" : "MISSING!");
+  console.log("[GoogleCalendar] Redirect URI:", redirectUri);
 
   // Create the auth request with PKCE
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
@@ -118,9 +136,12 @@ export function useGoogleCalendarAuth() {
         throw new Error("No code verifier available");
       }
 
+      const clientSecret = getClientSecret();
+
       const tokenResponse = await AuthSession.exchangeCodeAsync(
         {
           clientId,
+          clientSecret, // Required for web, undefined for mobile (PKCE)
           code,
           redirectUri,
           extraParams: {
@@ -280,9 +301,11 @@ async function getValidAccessToken(): Promise<string> {
 
   try {
     const clientId = getClientId();
+    const clientSecret = getClientSecret();
     const tokenResponse = await AuthSession.refreshAsync(
       {
         clientId,
+        clientSecret, // Required for web
         refreshToken: tokens.refresh_token,
       },
       discovery

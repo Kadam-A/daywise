@@ -18,6 +18,8 @@ import { useFocusEffect } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import {
   format,
+  addDays,
+  subDays,
   addWeeks,
   subWeeks,
   addMonths,
@@ -30,8 +32,9 @@ import { getLocalCalendarEvents } from "@/lib/google-calendar";
 import CalendarWeekView from "@/components/CalendarWeekView";
 import CalendarMonthView from "@/components/CalendarMonthView";
 import CalendarDayList from "@/components/CalendarDayList";
+import DayTimeline from "@/components/DayTimeline";
 
-type ViewMode = "week" | "month";
+type ViewMode = "day" | "week" | "month";
 
 export default function CalendarScreen() {
   const [viewMode, setViewMode] = useState<ViewMode>("week");
@@ -82,7 +85,9 @@ export default function CalendarScreen() {
   };
 
   const handlePrevious = () => {
-    if (viewMode === "week") {
+    if (viewMode === "day") {
+      setSelectedDate(subDays(selectedDate, 1));
+    } else if (viewMode === "week") {
       setCurrentWeek(subWeeks(currentWeek, 1));
     } else {
       setCurrentMonth(subMonths(currentMonth, 1));
@@ -90,7 +95,9 @@ export default function CalendarScreen() {
   };
 
   const handleNext = () => {
-    if (viewMode === "week") {
+    if (viewMode === "day") {
+      setSelectedDate(addDays(selectedDate, 1));
+    } else if (viewMode === "week") {
       setCurrentWeek(addWeeks(currentWeek, 1));
     } else {
       setCurrentMonth(addMonths(currentMonth, 1));
@@ -109,7 +116,9 @@ export default function CalendarScreen() {
   };
 
   const getHeaderTitle = () => {
-    if (viewMode === "week") {
+    if (viewMode === "day") {
+      return format(selectedDate, "EEEE, MMM d");
+    } else if (viewMode === "week") {
       return format(currentWeek, "MMMM yyyy");
     }
     return format(currentMonth, "MMMM yyyy");
@@ -157,43 +166,61 @@ export default function CalendarScreen() {
             value={viewMode}
             onValueChange={(value) => setViewMode(value as ViewMode)}
             buttons={[
+              { value: "day", label: "Day" },
               { value: "week", label: "Week" },
               { value: "month", label: "Month" },
             ]}
             style={styles.viewToggle}
+            density="small"
           />
         </View>
       </View>
 
-      <ScrollView style={styles.content}>
-        {/* Calendar View */}
-        <View style={styles.calendarContainer}>
-          {viewMode === "week" ? (
-            <CalendarWeekView
-              weekStart={currentWeek}
+      <ScrollView style={styles.content} contentContainerStyle={viewMode === "day" ? styles.dayViewContent : undefined}>
+        {/* Day Timeline View */}
+        {viewMode === "day" && (
+          <View style={styles.dayTimelineContainer}>
+            <DayTimeline
               tasks={tasks}
-              selectedDate={selectedDate}
-              onSelectDate={setSelectedDate}
+              calendarEvents={calendarEvents}
+              date={selectedDate}
+              onTaskPress={handleTaskPress}
             />
-          ) : (
-            <CalendarMonthView
-              month={currentMonth}
-              tasks={tasks}
-              selectedDate={selectedDate}
-              onSelectDate={setSelectedDate}
-            />
-          )}
-        </View>
+          </View>
+        )}
 
-        {/* Day List */}
-        <View style={styles.dayListContainer}>
-          <CalendarDayList
-            date={selectedDate}
-            tasks={tasks}
-            calendarEvents={calendarEvents}
-            onTaskPress={handleTaskPress}
-          />
-        </View>
+        {/* Week/Month Calendar View */}
+        {viewMode !== "day" && (
+          <>
+            <View style={styles.calendarContainer}>
+              {viewMode === "week" ? (
+                <CalendarWeekView
+                  weekStart={currentWeek}
+                  tasks={tasks}
+                  selectedDate={selectedDate}
+                  onSelectDate={setSelectedDate}
+                />
+              ) : (
+                <CalendarMonthView
+                  month={currentMonth}
+                  tasks={tasks}
+                  selectedDate={selectedDate}
+                  onSelectDate={setSelectedDate}
+                />
+              )}
+            </View>
+
+            {/* Day List */}
+            <View style={styles.dayListContainer}>
+              <CalendarDayList
+                date={selectedDate}
+                tasks={tasks}
+                calendarEvents={calendarEvents}
+                onTaskPress={handleTaskPress}
+              />
+            </View>
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -260,5 +287,15 @@ const styles = StyleSheet.create({
   },
   dayListContainer: {
     flex: 1,
+  },
+  dayViewContent: {
+    flexGrow: 1,
+  },
+  dayTimelineContainer: {
+    flex: 1,
+    minHeight: 500,
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    overflow: "hidden",
   },
 });

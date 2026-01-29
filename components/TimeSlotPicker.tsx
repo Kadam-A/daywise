@@ -5,14 +5,18 @@
  * User can pick any available slot for their task.
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   View,
   StyleSheet,
   ScrollView,
   Pressable,
+  Platform,
+  ScrollView as ScrollViewType,
 } from "react-native";
-import { Text, Button, Chip } from "react-native-paper";
+import { Text, Button } from "react-native-paper";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import { Task, TimeSlot } from "../lib/types";
 
 interface BusySlot {
@@ -47,6 +51,8 @@ const formatHour = (hour: number): string => {
   return `${displayHour}:00 ${period}`;
 };
 
+const SLOT_HEIGHT = 58; // paddingVertical(14*2) + marginBottom(8) + content height
+
 export default function TimeSlotPicker({
   task,
   busySlots,
@@ -54,6 +60,8 @@ export default function TimeSlotPicker({
 }: TimeSlotPickerProps) {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [selectedHour, setSelectedHour] = useState<number | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const timeScrollRef = useRef<ScrollViewType>(null);
 
   // Generate next 7 days
   const dayOptions: DayOption[] = useMemo(() => {
@@ -128,6 +136,23 @@ export default function TimeSlotPicker({
     return slots;
   }, [selectedDate, busySlots, task?.duration_minutes]);
 
+  // Auto-scroll to first available slot
+  useEffect(() => {
+    const firstAvailableIndex = hourSlots.findIndex(
+      (slot) => slot.status === "available"
+    );
+
+    if (firstAvailableIndex > 0 && timeScrollRef.current) {
+      // Small delay to ensure layout is complete
+      setTimeout(() => {
+        timeScrollRef.current?.scrollTo({
+          y: firstAvailableIndex * SLOT_HEIGHT,
+          animated: true,
+        });
+      }, 100);
+    }
+  }, [hourSlots]);
+
   const handleSelectSlot = () => {
     if (selectedHour === null || !task) return;
 
@@ -151,6 +176,23 @@ export default function TimeSlotPicker({
     if (selectedHour === null) return "";
     const endHour = selectedHour + Math.ceil((task?.duration_minutes || 60) / 60);
     return `${formatHour(selectedHour)} - ${formatHour(endHour)}`;
+  };
+
+  const handleDatePickerChange = (event: any, date?: Date) => {
+    setShowDatePicker(Platform.OS === "ios");
+    if (date) {
+      setSelectedDate(date);
+      setSelectedHour(null);
+    }
+  };
+
+  // Check if selected date is in the quick options
+  const isCustomDate = !dayOptions.some(
+    (day) => day.date.toDateString() === selectedDate.toDateString()
+  );
+
+  const formatCustomDate = (date: Date): string => {
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   };
 
   return (
@@ -194,7 +236,41 @@ export default function TimeSlotPicker({
             </Pressable>
           );
         })}
+
+        {/* Custom date chip (shows when a date outside quick options is selected) */}
+        {isCustomDate && (
+          <Pressable
+            onPress={() => setShowDatePicker(true)}
+            style={[styles.dateChip, styles.dateChipSelected]}
+          >
+            <Text style={[styles.dateChipDay, styles.dateChipTextSelected]}>
+              {selectedDate.toLocaleDateString("en-US", { weekday: "short" })}
+            </Text>
+            <Text style={[styles.dateChipDate, styles.dateChipTextSelected]}>
+              {formatCustomDate(selectedDate)}
+            </Text>
+          </Pressable>
+        )}
+
+        {/* More dates button */}
+        <Pressable
+          onPress={() => setShowDatePicker(true)}
+          style={[styles.dateChip, styles.moreChip]}
+        >
+          <MaterialCommunityIcons name="calendar" size={20} color="#666" />
+          <Text style={styles.moreChipText}>More</Text>
+        </Pressable>
       </ScrollView>
+
+      {/* Date Picker Modal */}
+      {showDatePicker && (
+        <DateTimePicker
+          value={selectedDate}
+          mode="date"
+          minimumDate={new Date()}
+          onChange={handleDatePickerChange}
+        />
+      )}
 
       {/* Time Selection */}
       <Text style={styles.sectionTitle}>Select Time</Text>
@@ -202,7 +278,12 @@ export default function TimeSlotPicker({
         Task duration: {task?.duration_minutes || 60} min
       </Text>
 
-      <ScrollView style={styles.timeScroll} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        ref={timeScrollRef}
+        style={styles.timeScroll}
+        showsVerticalScrollIndicator={true}
+        nestedScrollEnabled={true}
+      >
         {hourSlots.map((slot) => {
           const isSelected = selectedHour === slot.hour;
           const isDisabled = slot.status === "busy";
@@ -276,11 +357,14 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 16,
     fontWeight: "600",
-    marginBottom: 12,
+    marginBottom: 8,
     color: "#333",
+    flexShrink: 0,
   },
   dateScroll: {
-    marginBottom: 24,
+    marginBottom: 16,
+    flexGrow: 0,
+    flexShrink: 0,
   },
   dateScrollContent: {
     gap: 8,
@@ -309,13 +393,23 @@ const styles = StyleSheet.create({
   dateChipTextSelected: {
     color: "#fff",
   },
+  moreChip: {
+    backgroundColor: "#f0f0f0",
+    justifyContent: "center",
+    gap: 4,
+  },
+  moreChipText: {
+    fontSize: 12,
+    color: "#666",
+  },
   durationHint: {
     fontSize: 14,
     color: "#666",
-    marginBottom: 12,
+    marginBottom: 8,
+    flexShrink: 0,
   },
   timeScroll: {
-    maxHeight: 300,
+    flex: 1,
   },
   timeSlot: {
     flexDirection: "row",
@@ -374,9 +468,11 @@ const styles = StyleSheet.create({
     color: "#999",
   },
   footer: {
-    paddingTop: 16,
+    paddingTop: 12,
+    paddingBottom: 16,
     borderTopWidth: 1,
     borderTopColor: "#f0f0f0",
+    flexShrink: 0,
   },
   confirmButton: {},
 });

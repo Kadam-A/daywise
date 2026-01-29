@@ -184,13 +184,15 @@ export default function NextUpCard({
         {/* Score bar (if SMART scheduled) */}
         {task.scheduling_method === "SMART" && (
           <View style={styles.scoreSection}>
-            <ProgressBar
-              progress={0.85}
-              color={colors.accent}
-              style={styles.progressBar}
-            />
+            <View style={styles.progressBarContainer}>
+              <ProgressBar
+                progress={0.85}
+                color={colors.accent}
+                style={styles.progressBar}
+              />
+            </View>
             <Text style={[styles.scoreText, { color: colors.text }]}>
-              85% match
+              85%
             </Text>
           </View>
         )}
@@ -272,17 +274,20 @@ const styles = StyleSheet.create({
   scoreSection: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
     marginBottom: 16,
   },
-  progressBar: {
+  progressBarContainer: {
     flex: 1,
+    marginRight: 10,
+  },
+  progressBar: {
     height: 6,
     borderRadius: 3,
   },
   scoreText: {
     fontSize: 13,
     fontWeight: "500",
+    minWidth: 35,
   },
   actions: {
     flexDirection: "row",

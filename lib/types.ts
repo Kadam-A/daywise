@@ -113,6 +113,29 @@ export interface Task {
   google_event_id?: string; // ID of synced Google Calendar event
   created_at: string; // ISO 8601 timestamp
   updated_at: string; // ISO 8601 timestamp
+
+  // Task Splitting (Subtasks)
+  parent_task_id?: string; // UUID of parent task if this is a subtask
+  subtask_order?: number; // Order within parent (0-indexed)
+  subtasks?: Task[]; // Client-side convenience: populated when fetching parent
+
+  // Tags
+  tags?: string[]; // Array of tag strings for categorization
+
+  // Recurring Tasks
+  is_recurring?: boolean; // True if this is a recurring task template
+  recurrence_rule?: RecurrenceRule; // Recurrence pattern
+  recurrence_parent_id?: string; // UUID of parent recurring task (for instances)
+  instance_date?: string; // ISO date string for which occurrence this represents
+}
+
+/**
+ * Recurrence rule for repeating tasks (simplified)
+ */
+export interface RecurrenceRule {
+  frequency: "daily" | "weekly" | "monthly";
+  days?: number[]; // For weekly: 1=Mon, 2=Tue, ..., 7=Sun
+  // No end date for MVP - runs forever
 }
 
 /**
@@ -127,6 +150,10 @@ export type CreateTaskInput = Pick<
   | "due_date"
   | "duration_minutes"
   | "priority"
+  | "parent_task_id"
+  | "tags"
+  | "is_recurring"
+  | "recurrence_rule"
 >;
 
 /**

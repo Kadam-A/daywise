@@ -105,32 +105,47 @@ export default function SchedulingModal({
             <IconButton icon="close" size={24} onPress={onClose} />
           </View>
 
-          <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-            {/* Loading State */}
-            {isLoading && (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" />
-                <Text style={styles.loadingText}>
-                  {schedulingMethod === "SMART"
-                    ? "Finding your perfect time..."
-                    : "Loading available times..."}
-                </Text>
-              </View>
-            )}
+          {/* Loading State */}
+          {isLoading && (
+            <View style={[styles.content, styles.loadingContainer]}>
+              <ActivityIndicator size="large" />
+              <Text style={styles.loadingText}>
+                {schedulingMethod === "SMART"
+                  ? "Finding your perfect time..."
+                  : "Loading available times..."}
+              </Text>
+            </View>
+          )}
 
-            {/* Error State */}
-            {error && !isLoading && (
-              <View style={styles.errorContainer}>
-                <Text style={styles.errorText}>{error}</Text>
-                <Button mode="outlined" onPress={onClose} style={styles.errorButton}>
-                  Try Again
-                </Button>
-              </View>
-            )}
+          {/* Error State */}
+          {error && !isLoading && (
+            <View style={[styles.content, styles.errorContainer]}>
+              <Text style={styles.errorText}>{error}</Text>
+              <Button mode="outlined" onPress={onClose} style={styles.errorButton}>
+                Try Again
+              </Button>
+            </View>
+          )}
 
-            {/* SMART Scheduling UI */}
-            {schedulingMethod === "SMART" && !isLoading && !error && topSlot && (
-              <>
+          {/* MANUAL Scheduling UI - NOT in ScrollView since TimeSlotPicker has its own */}
+          {schedulingMethod === "MANUAL" && !isLoading && !error && (
+            <View style={styles.manualContent}>
+              <TimeSlotPicker
+                task={task}
+                busySlots={busySlots}
+                onSelectSlot={onSelectSlot}
+              />
+            </View>
+          )}
+
+          {/* SMART Scheduling UI - uses ScrollView for alternatives list */}
+          {schedulingMethod === "SMART" && !isLoading && !error && (
+            <ScrollView
+              style={styles.content}
+              showsVerticalScrollIndicator={false}
+            >
+              {topSlot ? (
+                <>
                 {/* Top Recommendation */}
                 {!showAlternatives && (
                   <View style={styles.topRecommendation}>
@@ -232,31 +247,20 @@ export default function SchedulingModal({
                     </Button>
                   </View>
                 )}
-              </>
-            )}
-
-            {/* MANUAL Scheduling UI */}
-            {schedulingMethod === "MANUAL" && !isLoading && !error && (
-              <TimeSlotPicker
-                task={task}
-                busySlots={busySlots}
-                onSelectSlot={onSelectSlot}
-              />
-            )}
-
-            {/* No Slots Found */}
-            {!isLoading && !error && slots.length === 0 && schedulingMethod === "SMART" && (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyTitle}>No available times found</Text>
-                <Text style={styles.emptyText}>
-                  Try extending your deadline or adjusting your work hours in settings.
-                </Text>
-                <Button mode="outlined" onPress={onClose}>
-                  Close
-                </Button>
-              </View>
-            )}
-          </ScrollView>
+                </>
+              ) : (
+                <View style={styles.emptyContainer}>
+                  <Text style={styles.emptyTitle}>No available times found</Text>
+                  <Text style={styles.emptyText}>
+                    Try extending your deadline or adjusting your work hours in settings.
+                  </Text>
+                  <Button mode="outlined" onPress={onClose}>
+                    Close
+                  </Button>
+                </View>
+              )}
+            </ScrollView>
+          )}
         </Surface>
       </View>
     </Modal>
@@ -273,8 +277,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: "85%",
-    minHeight: 300,
+    height: "75%",
   },
   header: {
     flexDirection: "row",
@@ -291,6 +294,11 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 20,
+  },
+  manualContent: {
+    flex: 1,
+    padding: 20,
+    paddingBottom: 0,
   },
   loadingContainer: {
     alignItems: "center",

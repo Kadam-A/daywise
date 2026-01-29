@@ -250,7 +250,8 @@ const styles = StyleSheet.create({
     color: "#64748b",
   },
   statusChip: {
-    height: 24,
+    height: "auto",
+    paddingVertical: 2,
   },
   emptyState: {
     alignItems: "center",

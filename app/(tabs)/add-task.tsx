@@ -13,20 +13,23 @@ import {
   SegmentedButtons,
   RadioButton,
   HelperText,
+  Chip,
+  IconButton,
 } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { router } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import { format, addDays } from "date-fns";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import SchedulingModal from "@/components/SchedulingModal";
 import { scheduleTask } from "@/lib/scheduling";
-import { Task, TimeSlot, UserProfile, CalendarEvent } from "@/lib/types";
+import { Task, TimeSlot, UserProfile, CalendarEvent, RecurrenceRule } from "@/lib/types";
 import {
   isGoogleCalendarConnected,
   createGoogleCalendarEvent,
 } from "@/lib/google-calendar";
+import { scheduleTaskReminder } from "@/lib/notifications";
 
 export default function AddTaskScreen() {
   const [title, setTitle] = useState("");
@@ -38,6 +41,81 @@ export default function AddTaskScreen() {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Tag state
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState("");
+  const [existingTags, setExistingTags] = useState<string[]>([]);
+  const [showTagSuggestions, setShowTagSuggestions] = useState(false);
+
+  // Recurrence state
+  const [isRecurring, setIsRecurring] = useState(false);
+  const [recurrenceFrequency, setRecurrenceFrequency] = useState<"daily" | "weekly" | "monthly">("weekly");
+  const [recurrenceDays, setRecurrenceDays] = useState<number[]>([1, 3, 5]); // Mon, Wed, Fri default
+
+  const toggleRecurrenceDay = (day: number) => {
+    if (recurrenceDays.includes(day)) {
+      setRecurrenceDays(recurrenceDays.filter((d) => d !== day));
+    } else {
+      setRecurrenceDays([...recurrenceDays, day].sort());
+    }
+  };
+
+  const dayLabels = [
+    { day: 1, label: "M" },
+    { day: 2, label: "T" },
+    { day: 3, label: "W" },
+    { day: 4, label: "T" },
+    { day: 5, label: "F" },
+    { day: 6, label: "S" },
+    { day: 7, label: "S" },
+  ];
+
+  // Fetch existing tags on mount
+  useEffect(() => {
+    loadExistingTags();
+  }, []);
+
+  const loadExistingTags = async () => {
+    try {
+      const { data: tasks } = await supabase
+        .from("tasks")
+        .select("tags")
+        .not("tags", "eq", "{}");
+
+      if (tasks) {
+        // Extract unique tags from all tasks
+        const allTags = new Set<string>();
+        tasks.forEach((task) => {
+          if (task.tags) {
+            task.tags.forEach((tag: string) => allTags.add(tag));
+          }
+        });
+        setExistingTags(Array.from(allTags).sort());
+      }
+    } catch (err) {
+      console.error("[AddTask] Error loading tags:", err);
+    }
+  };
+
+  const addTag = (tag: string) => {
+    const trimmedTag = tag.trim().toLowerCase();
+    if (trimmedTag && !tags.includes(trimmedTag)) {
+      setTags([...tags, trimmedTag]);
+    }
+    setTagInput("");
+    setShowTagSuggestions(false);
+  };
+
+  const removeTag = (tagToRemove: string) => {
+    setTags(tags.filter((t) => t !== tagToRemove));
+  };
+
+  const filteredSuggestions = existingTags.filter(
+    (t) =>
+      t.toLowerCase().includes(tagInput.toLowerCase()) &&
+      !tags.includes(t.toLowerCase())
+  );
 
   // Scheduling modal state
   const [showSchedulingModal, setShowSchedulingModal] = useState(false);
@@ -68,6 +146,14 @@ export default function AddTaskScreen() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
+      // Build recurrence rule if recurring
+      const recurrenceRule: RecurrenceRule | null = isRecurring
+        ? {
+            frequency: recurrenceFrequency,
+            ...(recurrenceFrequency === "weekly" && { days: recurrenceDays }),
+          }
+        : null;
+
       // Create task
       const { data: insertedTask, error: insertError } = await supabase
         .from("tasks")
@@ -80,6 +166,9 @@ export default function AddTaskScreen() {
           scheduling_method: schedulingMethod,
           due_date: dueDate?.toISOString() || null,
           status: "pending_schedule",
+          tags: tags.length > 0 ? tags : [],
+          is_recurring: isRecurring,
+          recurrence_rule: recurrenceRule,
         })
         .select()
         .single();
@@ -242,12 +331,19 @@ export default function AddTaskScreen() {
         updateData.google_event_id = googleEventId;
       }
 
-      const { error: updateError } = await supabase
+      const { data: updatedTask, error: updateError } = await supabase
         .from("tasks")
         .update(updateData)
-        .eq("id", createdTask.id);
+        .eq("id", createdTask.id)
+        .select()
+        .single();
 
       if (updateError) throw updateError;
+
+      // Schedule notification reminder
+      if (updatedTask) {
+        await scheduleTaskReminder(updatedTask as Task);
+      }
 
       // Success - close modal and go back
       setShowSchedulingModal(false);
@@ -291,8 +387,9 @@ export default function AddTaskScreen() {
       </View>
 
       <ScrollView style={styles.content}>
+        {/* ESSENTIAL INFO */}
         <TextInput
-          label="Task Title"
+          label="What do you need to do?"
           value={title}
           onChangeText={setTitle}
           mode="outlined"
@@ -300,47 +397,48 @@ export default function AddTaskScreen() {
           placeholder="e.g., Write proposal"
         />
 
-        <TextInput
-          label="Description (optional)"
-          value={description}
-          onChangeText={setDescription}
-          mode="outlined"
-          multiline
-          numberOfLines={3}
-          style={styles.input}
-          placeholder="Add details about this task..."
-        />
-
-        <TextInput
-          label="Duration (minutes)"
-          value={duration}
-          onChangeText={setDuration}
-          mode="outlined"
-          keyboardType="numeric"
-          style={styles.input}
-          placeholder="60"
-        />
-
-        <View style={styles.section}>
-          <Text variant="titleMedium" style={styles.sectionTitle}>
-            Priority
-          </Text>
-          <SegmentedButtons
-            value={priority}
-            onValueChange={setPriority}
-            buttons={[
-              { value: "low", label: "Low" },
-              { value: "medium", label: "Medium" },
-              { value: "high", label: "High" },
-            ]}
-          />
+        {/* Duration and Priority - grouped */}
+        <View style={styles.rowSection}>
+          <View style={styles.durationContainer}>
+            <TextInput
+              label="Duration"
+              value={duration}
+              onChangeText={setDuration}
+              mode="outlined"
+              keyboardType="numeric"
+              placeholder="60"
+              right={<TextInput.Affix text="min" />}
+            />
+          </View>
+          <View style={styles.priorityContainer}>
+            <Text variant="labelMedium" style={styles.rowLabel}>Priority</Text>
+            <SegmentedButtons
+              value={priority}
+              onValueChange={setPriority}
+              buttons={[
+                { value: "low", label: "Low" },
+                { value: "medium", label: "Med" },
+                { value: "high", label: "High" },
+              ]}
+              density="small"
+            />
+          </View>
         </View>
 
+        {/* Due Date */}
         <View style={styles.section}>
           <Text variant="titleMedium" style={styles.sectionTitle}>
-            Due Date (optional)
+            Due Date
           </Text>
           <View style={styles.quickDates}>
+            <Pressable
+              style={[styles.quickDateButton, !dueDate && styles.quickDateButtonSelected]}
+              onPress={() => setDueDate(null)}
+            >
+              <Text style={[styles.quickDateText, !dueDate && styles.quickDateTextSelected]}>
+                No deadline
+              </Text>
+            </Pressable>
             {quickDueDates.map((item) => (
               <Pressable
                 key={item.label}
@@ -366,12 +464,12 @@ export default function AddTaskScreen() {
               style={styles.quickDateButton}
               onPress={() => setShowDatePicker(true)}
             >
-              <Text style={styles.quickDateText}>Pick Date</Text>
+              <Text style={styles.quickDateText}>Other</Text>
             </Pressable>
           </View>
           {dueDate && (
             <Text variant="bodySmall" style={styles.selectedDate}>
-              Due: {format(dueDate, "EEEE, MMMM d, yyyy")}
+              Due: {format(dueDate, "EEE, MMM d")}
             </Text>
           )}
           {showDatePicker && (
@@ -384,37 +482,196 @@ export default function AddTaskScreen() {
           )}
         </View>
 
+        {/* Scheduling Method - simplified */}
         <View style={styles.section}>
           <Text variant="titleMedium" style={styles.sectionTitle}>
-            Scheduling Method
+            How should we schedule this?
+          </Text>
+          <View style={styles.schedulingOptions}>
+            <Pressable
+              style={[
+                styles.schedulingOption,
+                schedulingMethod === "SMART" && styles.schedulingOptionSelected,
+              ]}
+              onPress={() => setSchedulingMethod("SMART")}
+            >
+              <Text style={[
+                styles.schedulingOptionTitle,
+                schedulingMethod === "SMART" && styles.schedulingOptionTitleSelected,
+              ]}>
+                AI picks best time
+              </Text>
+              <Text style={styles.schedulingOptionDesc}>
+                Finds your optimal focus time
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.schedulingOption,
+                schedulingMethod === "MANUAL" && styles.schedulingOptionSelected,
+              ]}
+              onPress={() => setSchedulingMethod("MANUAL")}
+            >
+              <Text style={[
+                styles.schedulingOptionTitle,
+                schedulingMethod === "MANUAL" && styles.schedulingOptionTitleSelected,
+              ]}>
+                I'll pick
+              </Text>
+              <Text style={styles.schedulingOptionDesc}>
+                Choose from calendar
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {/* OPTIONAL SECTIONS - Collapsible feel */}
+        <View style={styles.optionalDivider}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>Optional</Text>
+          <View style={styles.dividerLine} />
+        </View>
+
+        {/* Description */}
+        <TextInput
+          label="Notes"
+          value={description}
+          onChangeText={setDescription}
+          mode="outlined"
+          multiline
+          numberOfLines={2}
+          style={styles.input}
+          placeholder="Add details..."
+        />
+
+        {/* Recurrence Section - simplified */}
+        <View style={styles.section}>
+          <View style={styles.recurrenceToggle}>
+            <Text variant="titleMedium" style={styles.sectionTitle}>
+              Repeat
+            </Text>
+            <Pressable
+              style={[
+                styles.toggleButton,
+                isRecurring && styles.toggleButtonActive,
+              ]}
+              onPress={() => setIsRecurring(!isRecurring)}
+            >
+              <Text
+                style={[
+                  styles.toggleButtonText,
+                  isRecurring && styles.toggleButtonTextActive,
+                ]}
+              >
+                {isRecurring ? "ON" : "OFF"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {isRecurring && (
+            <View style={styles.recurrenceOptions}>
+              <SegmentedButtons
+                value={recurrenceFrequency}
+                onValueChange={(value) =>
+                  setRecurrenceFrequency(value as "daily" | "weekly" | "monthly")
+                }
+                buttons={[
+                  { value: "daily", label: "Daily" },
+                  { value: "weekly", label: "Weekly" },
+                  { value: "monthly", label: "Monthly" },
+                ]}
+                style={styles.frequencyButtons}
+                density="small"
+              />
+
+              {recurrenceFrequency === "weekly" && (
+                <View style={styles.daySelector}>
+                  <View style={styles.dayButtons}>
+                    {dayLabels.map(({ day, label }) => (
+                      <Pressable
+                        key={day}
+                        style={[
+                          styles.dayButton,
+                          recurrenceDays.includes(day) && styles.dayButtonActive,
+                        ]}
+                        onPress={() => toggleRecurrenceDay(day)}
+                      >
+                        <Text
+                          style={[
+                            styles.dayButtonText,
+                            recurrenceDays.includes(day) && styles.dayButtonTextActive,
+                          ]}
+                        >
+                          {label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+
+        {/* Tags Section */}
+        <View style={styles.section}>
+          <Text variant="titleMedium" style={styles.sectionTitle}>
+            Tags
           </Text>
 
-          <RadioButton.Group
-            onValueChange={setSchedulingMethod}
-            value={schedulingMethod}
-          >
-            <View style={styles.radioOption}>
-              <RadioButton.Item
-                label="Let AI pick the best time"
-                value="SMART"
-                position="leading"
-              />
-              <Text variant="bodySmall" style={styles.radioDescription}>
-                AI analyzes your schedule and personality to find optimal time
-              </Text>
+          {tags.length > 0 && (
+            <View style={styles.tagChips}>
+              {tags.map((tag) => (
+                <Chip
+                  key={tag}
+                  onClose={() => removeTag(tag)}
+                  style={styles.tagChip}
+                  textStyle={styles.tagChipText}
+                >
+                  {tag}
+                </Chip>
+              ))}
             </View>
+          )}
 
-            <View style={styles.radioOption}>
-              <RadioButton.Item
-                label="I'll pick the time myself"
-                value="MANUAL"
-                position="leading"
-              />
-              <Text variant="bodySmall" style={styles.radioDescription}>
-                Choose exact time from calendar picker
-              </Text>
+          <View style={styles.tagInputContainer}>
+            <TextInput
+              mode="outlined"
+              placeholder="Add tag..."
+              value={tagInput}
+              onChangeText={(text) => {
+                setTagInput(text);
+                setShowTagSuggestions(text.length > 0);
+              }}
+              onSubmitEditing={() => {
+                if (tagInput.trim()) addTag(tagInput);
+              }}
+              style={styles.tagInput}
+              dense
+              right={
+                tagInput.trim() ? (
+                  <TextInput.Icon
+                    icon="plus"
+                    onPress={() => addTag(tagInput)}
+                  />
+                ) : undefined
+              }
+            />
+          </View>
+
+          {showTagSuggestions && filteredSuggestions.length > 0 && (
+            <View style={styles.tagSuggestions}>
+              {filteredSuggestions.slice(0, 5).map((tag) => (
+                <Pressable
+                  key={tag}
+                  style={styles.tagSuggestion}
+                  onPress={() => addTag(tag)}
+                >
+                  <Text style={styles.tagSuggestionText}>{tag}</Text>
+                </Pressable>
+              ))}
             </View>
-          </RadioButton.Group>
+          )}
         </View>
 
         {error && (
@@ -473,11 +730,73 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   section: {
-    marginBottom: 24,
+    marginBottom: 20,
   },
   sectionTitle: {
-    marginBottom: 12,
+    marginBottom: 10,
     fontWeight: "600",
+  },
+  // Row layout for duration + priority
+  rowSection: {
+    flexDirection: "row",
+    gap: 16,
+    marginBottom: 20,
+  },
+  durationContainer: {
+    flex: 1,
+  },
+  priorityContainer: {
+    flex: 1.5,
+  },
+  rowLabel: {
+    marginBottom: 8,
+    color: "#666",
+  },
+  // Scheduling options
+  schedulingOptions: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  schedulingOption: {
+    flex: 1,
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#ffffff",
+  },
+  schedulingOptionSelected: {
+    borderColor: "#2563eb",
+    backgroundColor: "#eff6ff",
+  },
+  schedulingOptionTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#334155",
+    marginBottom: 4,
+  },
+  schedulingOptionTitleSelected: {
+    color: "#2563eb",
+  },
+  schedulingOptionDesc: {
+    fontSize: 12,
+    color: "#64748b",
+  },
+  // Optional divider
+  optionalDivider: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginVertical: 20,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: "#e2e8f0",
+  },
+  dividerText: {
+    paddingHorizontal: 12,
+    fontSize: 12,
+    color: "#94a3b8",
   },
   quickDates: {
     flexDirection: "row",
@@ -526,5 +845,107 @@ const styles = StyleSheet.create({
   },
   buttonContent: {
     paddingVertical: 8,
+  },
+  // Tag styles
+  tagChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 12,
+  },
+  tagChip: {
+    backgroundColor: "#e0f2fe",
+    height: "auto",
+  },
+  tagChipText: {
+    fontSize: 13,
+  },
+  tagInputContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  tagInput: {
+    flex: 1,
+    backgroundColor: "#fff",
+  },
+  tagSuggestions: {
+    backgroundColor: "#f8fafc",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    marginTop: 4,
+    overflow: "hidden",
+  },
+  tagSuggestion: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e2e8f0",
+  },
+  tagSuggestionText: {
+    color: "#334155",
+  },
+  // Recurrence styles
+  recurrenceToggle: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  toggleButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: "#e2e8f0",
+  },
+  toggleButtonActive: {
+    backgroundColor: "#2563eb",
+  },
+  toggleButtonText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#64748b",
+  },
+  toggleButtonTextActive: {
+    color: "#ffffff",
+  },
+  recurrenceOptions: {
+    marginTop: 16,
+  },
+  frequencyButtons: {
+    marginBottom: 16,
+  },
+  daySelector: {
+    marginBottom: 12,
+  },
+  daySelectorLabel: {
+    color: "#64748b",
+    marginBottom: 8,
+  },
+  dayButtons: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  dayButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#f1f5f9",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  dayButtonActive: {
+    backgroundColor: "#2563eb",
+  },
+  dayButtonText: {
+    fontSize: 13,
+    fontWeight: "500",
+    color: "#64748b",
+  },
+  dayButtonTextActive: {
+    color: "#ffffff",
+  },
+  recurrenceHint: {
+    color: "#64748b",
+    fontStyle: "italic",
   },
 });
