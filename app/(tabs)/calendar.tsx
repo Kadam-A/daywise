@@ -181,10 +181,12 @@ export default function CalendarScreen() {
         {viewMode === "day" && (
           <View style={styles.dayTimelineContainer}>
             <DayTimeline
+              key={`day-${selectedDate.toISOString()}`}
               tasks={tasks}
               calendarEvents={calendarEvents}
               date={selectedDate}
               onTaskPress={handleTaskPress}
+              autoScrollToNow={true}
             />
           </View>
         )}

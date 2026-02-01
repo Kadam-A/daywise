@@ -8,7 +8,7 @@
  * - Current time indicator (red line)
  */
 
-import React, { useMemo, useEffect, useState } from "react";
+import React, { useMemo, useEffect, useState, useRef } from "react";
 import { View, StyleSheet, ScrollView, Pressable } from "react-native";
 import { Text, Surface } from "react-native-paper";
 import { Task, CalendarEvent } from "@/lib/types";
@@ -21,6 +21,7 @@ interface DayTimelineProps {
   onTaskPress: (task: Task) => void;
   startHour?: number;
   endHour?: number;
+  autoScrollToNow?: boolean;
 }
 
 const HOUR_HEIGHT = 60; // pixels per hour
@@ -37,8 +38,11 @@ export default function DayTimeline({
   onTaskPress,
   startHour = 6,
   endHour = 22,
+  autoScrollToNow = false,
 }: DayTimelineProps) {
   const [currentTime, setCurrentTime] = useState(new Date());
+  const scrollViewRef = useRef<ScrollView>(null);
+  const hasScrolledRef = useRef(false);
 
   // Update current time every minute
   useEffect(() => {
@@ -47,6 +51,26 @@ export default function DayTimeline({
     }, 60000);
     return () => clearInterval(interval);
   }, []);
+
+  // Auto-scroll to current time when viewing today
+  useEffect(() => {
+    if (autoScrollToNow && isToday(date)) {
+      const now = new Date();
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const startOffset = nowMinutes - startHour * 60;
+
+      if (startOffset > 0 && nowMinutes <= endHour * 60) {
+        const scrollPosition = Math.max(0, (startOffset / 60) * HOUR_HEIGHT - 100);
+
+        // Delay scroll to ensure ScrollView is mounted and layout is complete
+        const timer = setTimeout(() => {
+          scrollViewRef.current?.scrollTo({ y: scrollPosition, animated: true });
+        }, 300);
+
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [autoScrollToNow, date, startHour, endHour]);
 
   // Filter items for this day
   const dayTasks = useMemo(() => {
@@ -111,6 +135,7 @@ export default function DayTimeline({
   return (
     <View style={styles.container}>
       <ScrollView
+        ref={scrollViewRef}
         style={styles.scrollView}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ height: totalHeight + 20 }}
