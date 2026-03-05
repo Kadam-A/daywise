@@ -10,7 +10,6 @@
  * Rate limit: 100 requests/hour/user
  */
 
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
@@ -63,7 +62,7 @@ interface AISlotRecommendation {
   dev_reasoning?: string;
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -429,7 +428,7 @@ async function rankWithAI(
           .join("\n")
       : "No tasks scheduled on any day yet.";
 
-  const systemPrompt = `You are an AI scheduling assistant for TailoredTime. Your job is to pick the BEST 3 time slots for a task AND explain WHY each slot was chosen using the actual context of the user's day.
+  const systemPrompt = `You are an AI scheduling assistant for DayWise. Your job is to pick the BEST 3 time slots for a task AND explain WHY each slot was chosen using the actual context of the user's day.
 
 DECISION PRIORITIES (in order of importance):
 1. DUE DATE — The task must be done before its deadline. Closer deadlines = schedule sooner. If no deadline, schedule within a reasonable window.
@@ -572,7 +571,7 @@ Situation: Night owl, early morning is non-ideal but only option near deadline
           { role: "user", content: userPrompt },
         ],
         temperature: 0.3, // Lower temp for more reliable structured JSON selection
-        max_tokens: 500,
+        max_tokens: 700,
         response_format: { type: "json_object" },
       }),
       signal: controller.signal,
@@ -829,27 +828,6 @@ function generatePersonalizedReason(
 }
 
 /**
- * Generate a generic reason for a time slot (legacy fallback)
- */
-function generateGenericReason(slot: TimeSlot, rank: number): string {
-  const start = new Date(slot.start);
-  const hour = start.getHours();
-  const dayName = start.toLocaleDateString("en-US", { weekday: "long" });
-
-  if (rank === 0) {
-    return `Best available slot on ${dayName}`;
-  }
-
-  if (hour < 12) {
-    return `Morning option on ${dayName}`;
-  } else if (hour < 17) {
-    return `Afternoon option on ${dayName}`;
-  } else {
-    return `Evening option on ${dayName}`;
-  }
-}
-
-/**
  * Convert personality scores to human-readable descriptions
  * Includes energy peak AND dip windows so the AI can write accurate reasons
  */
@@ -946,26 +924,6 @@ function describePersonality(p: PersonalityData): string {
   }
 
   return lines.join("\n");
-}
-
-/**
- * Format date/time for display
- */
-function formatDateTime(date: Date): string {
-  return date.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }
 
 /**
