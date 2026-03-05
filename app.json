@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "TailoredTime",
-    "slug": "tailoredtime",
+    "name": "DayWise",
+    "slug": "daywise",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "tailoredtime",
+    "scheme": "daywise",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
@@ -18,14 +18,14 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.adam.tailoredtime",
+      "bundleIdentifier": "com.adam.daywise",
       "infoPlist": {
         "NSCalendarsUsageDescription": "This app needs access to your calendar to schedule and manage your tasks intelligently.",
         "NSRemindersUsageDescription": "This app needs access to reminders to help you stay on track with your tasks."
       }
     },
     "android": {
-      "package": "com.adam.tailoredtime",
+      "package": "com.adam.daywise",
       "adaptiveIcon": {
         "backgroundColor": "#2563eb",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
