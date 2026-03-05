@@ -49,6 +49,7 @@ export async function rankSlotsWithAI(
         task,
         personality: userProfile.personality_data,
         existingTasks, // For context
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, // For accurate week_start
       },
     });
 
@@ -56,22 +57,123 @@ export async function rankSlotsWithAI(
 
     // AI returns top 3 with scores and personalized reasons
     const aiRanked: TimeSlot[] = data.recommendations;
+    const devReasoning: string | undefined = data.dev_reasoning;
 
     console.log(`[rankSlotsWithAI] AI returned ${aiRanked.length} ranked slots`);
+    if (devReasoning) {
+      console.log(`[rankSlotsWithAI] === AI DEV REASONING ===`);
+      console.log(devReasoning);
+      console.log(`[rankSlotsWithAI] ======================`);
+    }
     return aiRanked.slice(0, 3); // Ensure max 3
   } catch (error) {
     console.error("[rankSlotsWithAI] AI ranking failed:", error);
 
-    // FALLBACK: Use top 3 from algorithm with generic reasons
-    return candidates.slice(0, 3).map((slot, index) => ({
-      ...slot,
-      reason: generateFallbackReason(slot, index),
-    }));
+    // FALLBACK: Use top 3 from algorithm with PERSONALIZED reasons
+    // Enforce diversity: pick slots at least 2 hours apart on same day
+    const picked: TimeSlot[] = [];
+    for (const slot of candidates) {
+      if (picked.length >= 3) break;
+      const slotStart = new Date(slot.start);
+      const isTooClose = picked.some((p) => {
+        const pStart = new Date(p.start);
+        const diffMs = Math.abs(slotStart.getTime() - pStart.getTime());
+        const diffHours = diffMs / (1000 * 60 * 60);
+        const sameDay = slotStart.toDateString() === pStart.toDateString();
+        return sameDay && diffHours < 2;
+      });
+      if (!isTooClose) {
+        picked.push({
+          ...slot,
+          reason: generatePersonalizedFallbackReason(slot, picked.length, task, userProfile),
+        });
+      }
+    }
+    // Fill remaining if needed
+    for (const slot of candidates) {
+      if (picked.length >= 3) break;
+      if (picked.some((p) => p.start === slot.start)) continue;
+      picked.push({
+        ...slot,
+        reason: generatePersonalizedFallbackReason(slot, picked.length, task, userProfile),
+      });
+    }
+    return picked;
   }
 }
 
 /**
- * Fallback reason generator (when AI fails)
+ * Personalized fallback reason generator (when AI fails)
+ * Uses personality data to generate contextual reasons
+ */
+function generatePersonalizedFallbackReason(
+  slot: TimeSlot,
+  rank: number,
+  task: Task,
+  userProfile: UserProfile
+): string {
+  const start = new Date(slot.start);
+  const hour = start.getHours();
+  const dayName = start.toLocaleDateString("en-US", { weekday: "long" });
+  const personality = userProfile.personality_data;
+
+  // Get time of day
+  const timeOfDay = hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
+
+  // Map numeric personality fields (0–100) to readable traits
+  const chronotype = personality?.chronotype ?? 50;       // 0=Night Owl, 100=Early Bird
+  const deadlineStyle = personality?.deadline_style ?? 50; // 0=Start early, 100=Deadline pressure
+  const structurePref = personality?.structure_preference ?? 50; // 0=Rigid/planner, 100=Fluid
+
+  // Infer peak hours from chronotype (replaces the non-existent peak_hours field)
+  const isPeakHour =
+    (chronotype < 40 && (hour >= 20 || hour <= 2)) ||       // night owl: 8pm–2am
+    (chronotype > 60 && hour >= 6 && hour <= 12) ||          // early bird: 6am–noon
+    (chronotype >= 40 && chronotype <= 60 && hour >= 9 && hour <= 17); // balanced: 9am–5pm
+
+  // Build personalized reason based on personality
+  if (rank === 0) {
+    // Top recommendation - make it feel smart
+    if (chronotype < 40 && hour >= 14) {
+      return "Matches your preference for later in the day";
+    } else if (chronotype > 60 && hour < 12) {
+      return "Perfect for your morning peak productivity";
+    } else if (task.priority === "high" && isPeakHour) {
+      return "Scheduled during your peak energy hours";
+    } else if (deadlineStyle > 60 && task.due_date) {
+      return "Gives you time before your deadline";
+    }
+    return `Best available slot matching your preferences`;
+  }
+
+  // Alternative slots - explain why they're good options
+  if (rank === 1) {
+    if (timeOfDay === "morning" && chronotype > 60) {
+      return `Another ${timeOfDay} option for your active hours`;
+    } else if (timeOfDay === "evening" && chronotype < 40) {
+      return `Evening alternative when you're most alert`;
+    } else if (task.priority === "low") {
+      return `Flexible timing for this lower-priority task`;
+    }
+    return `Alternative ${timeOfDay} slot on ${dayName}`;
+  }
+
+  // Third option
+  if (rank === 2) {
+    if (structurePref < 40) {
+      return `Backup option to keep your schedule flexible`;
+    } else if (structurePref > 60) {
+      return `Different time if your plans change`;
+    }
+    return `${dayName} ${timeOfDay} as a backup option`;
+  }
+
+  // Fallback for any other rank
+  return `Available ${timeOfDay} slot on ${dayName}`;
+}
+
+/**
+ * Simple fallback reason generator (legacy/backup)
  */
 function generateFallbackReason(slot: TimeSlot, rank: number): string {
   const start = new Date(slot.start);

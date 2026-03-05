@@ -1,5 +1,5 @@
 /**
- * TailoredTime - Google Calendar Integration
+ * DayWise - Google Calendar Integration
  *
  * Handles OAuth 2.0 authentication and calendar sync with Google Calendar API.
  * Uses PKCE for secure mobile OAuth flow.
@@ -60,7 +60,61 @@ const STORAGE_KEYS = {
   refreshToken: "google_refresh_token",
   tokenExpiry: "google_token_expiry",
   lastSyncTime: "google_last_sync",
+  pendingCalendarOps: "google_pending_calendar_ops",
 };
+
+// Retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelay: 1000, // 1 second
+  maxDelay: 10000, // 10 seconds
+};
+
+/**
+ * Retry a function with exponential backoff
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number } = {}
+): Promise<T> {
+  const maxRetries = options.maxRetries ?? RETRY_CONFIG.maxRetries;
+  const baseDelay = options.baseDelay ?? RETRY_CONFIG.baseDelay;
+
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+
+      // Don't retry on auth errors
+      if (lastError.message.includes("Not connected") ||
+          lastError.message.includes("Session expired") ||
+          lastError.message.includes("401")) {
+        throw lastError;
+      }
+
+      if (attempt < maxRetries) {
+        const delay = Math.min(baseDelay * Math.pow(2, attempt), RETRY_CONFIG.maxDelay);
+        console.log(`[Calendar] Retry ${attempt + 1}/${maxRetries} after ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Calendar operation result type
+ */
+export interface CalendarOperationResult {
+  success: boolean;
+  eventId?: string;
+  error?: string;
+  needsRetry?: boolean;
+}
 
 /**
  * Hook for Google Calendar OAuth authentication
@@ -76,7 +130,7 @@ export function useGoogleCalendarAuth() {
   // In Expo Go, use the auth proxy (no scheme). In dev builds, use custom scheme.
   const redirectUri = isExpoGo
     ? AuthSession.makeRedirectUri({ path: "oauth" })
-    : AuthSession.makeRedirectUri({ scheme: "tailoredtime", path: "oauth" });
+    : AuthSession.makeRedirectUri({ scheme: "daywise", path: "oauth" });
 
   // Debug: Log the redirect URI being used
   console.log("[GoogleCalendar] Running in Expo Go:", isExpoGo);
@@ -442,7 +496,7 @@ export async function createGoogleCalendarEvent(
 
     const event = {
       summary: title,
-      description: description || `Task scheduled via TailoredTime`,
+      description: description || `Task scheduled via DayWise`,
       start: {
         dateTime: startTime,
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -502,7 +556,7 @@ export async function updateGoogleCalendarEvent(
 
     const event = {
       summary: title,
-      description: description || `Task scheduled via TailoredTime`,
+      description: description || `Task scheduled via DayWise`,
       start: {
         dateTime: startTime,
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -634,5 +688,251 @@ export async function getLocalCalendarEvents(
   } catch (error) {
     console.error("[getLocalCalendarEvents]", error);
     return [];
+  }
+}
+
+/**
+ * Safe wrapper for creating calendar events - doesn't throw, returns result
+ * Task scheduling should continue even if calendar sync fails
+ */
+export async function safeCreateCalendarEvent(
+  title: string,
+  description: string | undefined,
+  startTime: string,
+  endTime: string
+): Promise<CalendarOperationResult> {
+  try {
+    const isConnected = await isGoogleCalendarConnected();
+    if (!isConnected) {
+      return { success: false, error: "Google Calendar not connected" };
+    }
+
+    const eventId = await withRetry(() =>
+      createGoogleCalendarEvent(title, description, startTime, endTime)
+    );
+
+    return { success: true, eventId };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("[safeCreateCalendarEvent] Failed:", errorMessage);
+
+    // Save pending operation for later retry
+    await savePendingCalendarOperation({
+      type: "create",
+      title,
+      description,
+      startTime,
+      endTime,
+      timestamp: Date.now(),
+    });
+
+    return {
+      success: false,
+      error: errorMessage,
+      needsRetry: !errorMessage.includes("Session expired"),
+    };
+  }
+}
+
+/**
+ * Safe wrapper for updating calendar events - doesn't throw, returns result
+ */
+export async function safeUpdateCalendarEvent(
+  eventId: string,
+  title: string,
+  description: string | undefined,
+  startTime: string,
+  endTime: string
+): Promise<CalendarOperationResult> {
+  try {
+    const isConnected = await isGoogleCalendarConnected();
+    if (!isConnected) {
+      return { success: false, error: "Google Calendar not connected" };
+    }
+
+    await withRetry(() =>
+      updateGoogleCalendarEvent(eventId, title, description, startTime, endTime)
+    );
+
+    return { success: true, eventId };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("[safeUpdateCalendarEvent] Failed:", errorMessage);
+
+    // Save pending operation for later retry
+    await savePendingCalendarOperation({
+      type: "update",
+      eventId,
+      title,
+      description,
+      startTime,
+      endTime,
+      timestamp: Date.now(),
+    });
+
+    return {
+      success: false,
+      error: errorMessage,
+      needsRetry: !errorMessage.includes("Session expired"),
+    };
+  }
+}
+
+/**
+ * Safe wrapper for deleting calendar events - doesn't throw, returns result
+ */
+export async function safeDeleteCalendarEvent(
+  eventId: string
+): Promise<CalendarOperationResult> {
+  try {
+    const isConnected = await isGoogleCalendarConnected();
+    if (!isConnected) {
+      return { success: false, error: "Google Calendar not connected" };
+    }
+
+    await withRetry(() => deleteGoogleCalendarEvent(eventId));
+
+    return { success: true };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("[safeDeleteCalendarEvent] Failed:", errorMessage);
+
+    // Save pending operation for later retry
+    await savePendingCalendarOperation({
+      type: "delete",
+      eventId,
+      timestamp: Date.now(),
+    });
+
+    return {
+      success: false,
+      error: errorMessage,
+      needsRetry: !errorMessage.includes("Session expired"),
+    };
+  }
+}
+
+interface PendingCalendarOperation {
+  type: "create" | "update" | "delete";
+  eventId?: string;
+  title?: string;
+  description?: string;
+  startTime?: string;
+  endTime?: string;
+  timestamp: number;
+}
+
+/**
+ * Save a pending calendar operation for later retry
+ */
+async function savePendingCalendarOperation(
+  operation: PendingCalendarOperation
+): Promise<void> {
+  try {
+    const stored = await SecureStore.getItemAsync(STORAGE_KEYS.pendingCalendarOps);
+    const operations: PendingCalendarOperation[] = stored ? JSON.parse(stored) : [];
+
+    operations.push(operation);
+
+    // Keep only last 50 pending operations
+    const trimmed = operations.slice(-50);
+
+    await SecureStore.setItemAsync(
+      STORAGE_KEYS.pendingCalendarOps,
+      JSON.stringify(trimmed)
+    );
+
+    console.log(`[Calendar] Saved pending operation: ${operation.type}`);
+  } catch (error) {
+    console.error("[savePendingCalendarOperation] Error:", error);
+  }
+}
+
+/**
+ * Get count of pending calendar operations
+ */
+export async function getPendingCalendarOperationCount(): Promise<number> {
+  try {
+    const stored = await SecureStore.getItemAsync(STORAGE_KEYS.pendingCalendarOps);
+    const operations: PendingCalendarOperation[] = stored ? JSON.parse(stored) : [];
+    return operations.length;
+  } catch (error) {
+    return 0;
+  }
+}
+
+/**
+ * Process pending calendar operations
+ */
+export async function processPendingCalendarOperations(): Promise<{
+  success: number;
+  failed: number;
+}> {
+  try {
+    const stored = await SecureStore.getItemAsync(STORAGE_KEYS.pendingCalendarOps);
+    if (!stored) {
+      return { success: 0, failed: 0 };
+    }
+
+    const operations: PendingCalendarOperation[] = JSON.parse(stored);
+    if (operations.length === 0) {
+      return { success: 0, failed: 0 };
+    }
+
+    console.log(`[Calendar] Processing ${operations.length} pending operations`);
+
+    let success = 0;
+    let failed = 0;
+    const remaining: PendingCalendarOperation[] = [];
+
+    for (const op of operations) {
+      try {
+        switch (op.type) {
+          case "create":
+            await createGoogleCalendarEvent(
+              op.title!,
+              op.description,
+              op.startTime!,
+              op.endTime!
+            );
+            break;
+          case "update":
+            await updateGoogleCalendarEvent(
+              op.eventId!,
+              op.title!,
+              op.description,
+              op.startTime!,
+              op.endTime!
+            );
+            break;
+          case "delete":
+            await deleteGoogleCalendarEvent(op.eventId!);
+            break;
+        }
+        success++;
+      } catch (error) {
+        console.error(`[Calendar] Failed to process ${op.type}:`, error);
+
+        // Keep operations less than 24 hours old for retry
+        const age = Date.now() - op.timestamp;
+        if (age < 24 * 60 * 60 * 1000) {
+          remaining.push(op);
+        } else {
+          failed++;
+        }
+      }
+    }
+
+    // Save remaining operations
+    await SecureStore.setItemAsync(
+      STORAGE_KEYS.pendingCalendarOps,
+      JSON.stringify(remaining)
+    );
+
+    console.log(`[Calendar] Processed: ${success} success, ${failed} failed, ${remaining.length} remaining`);
+    return { success, failed };
+  } catch (error) {
+    console.error("[processPendingCalendarOperations] Error:", error);
+    return { success: 0, failed: 0 };
   }
 }

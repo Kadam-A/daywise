@@ -44,6 +44,18 @@ export function generateNextInstance(
     return null;
   }
 
+  // Preserve the due_date offset relative to the completed instance date.
+  // e.g. task started Monday, due Friday (4-day window) → next instance keeps that 4-day gap.
+  // Only computable when both values are known; omit otherwise to avoid false deadlines.
+  // Use the formatted instance_date as UTC midnight to avoid local-timezone drift.
+  let nextDueDate: string | undefined;
+  if (parentTask.due_date && completedInstanceDate) {
+    const offsetMs =
+      new Date(parentTask.due_date).getTime() - new Date(completedInstanceDate).getTime();
+    const instanceDateUTC = new Date(format(nextDate, "yyyy-MM-dd") + "T00:00:00.000Z");
+    nextDueDate = new Date(instanceDateUTC.getTime() + offsetMs).toISOString();
+  }
+
   // Return the new instance data (without id, created_at, etc.)
   return {
     user_id: parentTask.user_id,
@@ -52,8 +64,8 @@ export function generateNextInstance(
     duration_minutes: parentTask.duration_minutes,
     priority: parentTask.priority,
     scheduling_method: parentTask.scheduling_method,
-    auto_reschedule: parentTask.auto_reschedule,
     tags: parentTask.tags,
+    due_date: nextDueDate,
     status: "pending_schedule",
     recurrence_parent_id: parentTask.id,
     instance_date: format(nextDate, "yyyy-MM-dd"),

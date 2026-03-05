@@ -12,7 +12,7 @@
 
 import { preFilterTimeSlots } from "../scheduling-algorithm";
 import { Task, UserProfile, CalendarEvent, TimeSlot, PersonalityData } from "../types";
-import { addDays, addHours, setHours, setMinutes, format, startOfDay, getDay } from "date-fns";
+import { addDays, addHours, endOfDay, startOfHour, setHours, setMinutes, format, startOfDay, getDay } from "date-fns";
 
 // ============================================
 // TEST HELPERS
@@ -43,7 +43,6 @@ const createMockTask = (overrides: Partial<Task> = {}): Task => ({
   duration_minutes: 60,
   priority: "medium",
   scheduling_method: "SMART",
-  auto_reschedule: true,
   status: "pending_schedule",
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
@@ -306,9 +305,10 @@ describe("Scheduling Algorithm - preFilterTimeSlots", () => {
 
       const slots = preFilterTimeSlots(task, personality, [], [], 14);
 
-      // All slots should be before the deadline
+      // All slots should end by end-of-day on the deadline date
+      // (slots on the deadline day itself are valid; they just can't extend past midnight of that day)
       const allBeforeDeadline = slots.every((slot) => {
-        return new Date(slot.end) <= tomorrow;
+        return new Date(slot.end) <= endOfDay(tomorrow);
       });
 
       expect(allBeforeDeadline).toBe(true);
@@ -398,8 +398,7 @@ describe("Auto-Reschedule Logic", () => {
         status: "scheduled",
         scheduled_start: addHours(new Date(), -3).toISOString(),
         scheduled_end: addHours(new Date(), -2).toISOString(),
-        auto_reschedule: true,
-      });
+            });
 
       const isOverdue =
         pastTask.scheduled_end &&
@@ -415,8 +414,7 @@ describe("Auto-Reschedule Logic", () => {
         status: "scheduled",
         scheduled_start: addHours(new Date(), 2).toISOString(),
         scheduled_end: addHours(new Date(), 3).toISOString(),
-        auto_reschedule: true,
-      });
+            });
 
       const isOverdue =
         futureTask.scheduled_end &&
@@ -450,19 +448,98 @@ describe("Auto-Reschedule Logic", () => {
         status: "scheduled",
         scheduled_start: addHours(new Date(), -3).toISOString(),
         scheduled_end: addHours(new Date(), -2).toISOString(),
-        auto_reschedule: true,
-        duration_minutes: 60,
+              duration_minutes: 60,
       });
 
       const slots = preFilterTimeSlots(overdueTask, personality, [], [], 7);
 
-      // All slots should be in the future
-      const allFuture = slots.every((slot) => new Date(slot.start) > new Date());
+      // All slots should be at or after the start of the current hour
+      // (the algorithm intentionally allows the current hour so e.g. at 10:30 the 10:00 slot is still offered)
+      const allFuture = slots.every((slot) => new Date(slot.start) >= startOfHour(new Date()));
 
       expect(allFuture).toBe(true);
       expect(slots.length).toBeGreaterThan(0);
       console.log(`✓ Found ${slots.length} future slots for overdue task`);
     });
+  });
+});
+
+describe("Back-to-back and Gap Filters", () => {
+  it("should NOT penalise a slot with a 30-minute gap after a previous task", () => {
+    // Bug: differenceInHours truncates — a 30-min gap would return 0, falsely flagging back-to-back
+    const personality = createMockPersonalityData({ chronotype: 50 });
+    const nextWeekday = getNextWeekday();
+
+    // Existing task: 10:00–11:00
+    const existingStart = setHours(setMinutes(nextWeekday, 0), 10);
+    const existingTasks = [createScheduledTask(existingStart, 60, "Existing task")];
+
+    // Candidate slot: 11:30–12:30 (30-min gap — should NOT be flagged back-to-back)
+    const candidateStart = setHours(setMinutes(nextWeekday, 30), 11);
+    const task = createMockTask({ duration_minutes: 60 });
+    const slots = preFilterTimeSlots(task, personality, [], existingTasks, 3);
+
+    const slot1130 = slots.find((s) => {
+      const h = new Date(s.start).getHours();
+      const m = new Date(s.start).getMinutes();
+      return new Date(s.start).toDateString() === nextWeekday.toDateString() && h === 11 && m === 30;
+    });
+
+    // The 11:30 slot should exist and not have been eliminated by incorrect back-to-back penalty
+    expect(slot1130).toBeDefined();
+    console.log(`✓ 11:30 slot (30min gap) correctly kept — score: ${slot1130?.score}`);
+  });
+
+  it("should penalise a slot with a 5-minute gap (true back-to-back)", () => {
+    const personality = createMockPersonalityData({ chronotype: 50 });
+    const nextWeekday = getNextWeekday();
+
+    // Existing task: 10:00–11:00
+    const existingStart = setHours(setMinutes(nextWeekday, 0), 10);
+    const existingTasks = [createScheduledTask(existingStart, 60, "Existing task")];
+
+    // Slot at 11:00 is truly back-to-back (0-min gap) — score should be lower than 11:30 slot
+    const task = createMockTask({ duration_minutes: 60 });
+    const slots = preFilterTimeSlots(task, personality, [], existingTasks, 3);
+
+    const slot1100 = slots.find((s) => {
+      const h = new Date(s.start).getHours();
+      const m = new Date(s.start).getMinutes();
+      return new Date(s.start).toDateString() === nextWeekday.toDateString() && h === 11 && m === 0;
+    });
+    const slot1130 = slots.find((s) => {
+      const h = new Date(s.start).getHours();
+      const m = new Date(s.start).getMinutes();
+      return new Date(s.start).toDateString() === nextWeekday.toDateString() && h === 11 && m === 30;
+    });
+
+    if (slot1100 && slot1130) {
+      expect(slot1100.score).toBeLessThan(slot1130.score);
+      console.log(`✓ Back-to-back 11:00 score (${slot1100.score}) < 11:30 score (${slot1130.score})`);
+    } else {
+      console.log(`  (one slot not available — schedule is too tight to test this)`);
+    }
+  });
+});
+
+describe("Deadline Day Inclusion", () => {
+  it("should include slots on the due date day itself", () => {
+    const personality = createMockPersonalityData();
+    // Due date set to start of tomorrow (midnight) — previously would exclude all slots on that day
+    const tomorrow = addDays(startOfDay(new Date()), 1);
+    const task = createMockTask({
+      duration_minutes: 60,
+      due_date: tomorrow.toISOString(), // midnight = "due tomorrow"
+    });
+
+    const slots = preFilterTimeSlots(task, personality, [], [], 7);
+
+    const slotsOnDueDay = slots.filter((s) => {
+      return new Date(s.start).toDateString() === tomorrow.toDateString();
+    });
+
+    expect(slotsOnDueDay.length).toBeGreaterThan(0);
+    console.log(`✓ Found ${slotsOnDueDay.length} slots on the due date day (was 0 before fix)`);
   });
 });
 

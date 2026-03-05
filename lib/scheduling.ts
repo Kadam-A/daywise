@@ -14,7 +14,11 @@
 
 import { preFilterTimeSlots } from "./scheduling-algorithm";
 import { rankSlotsWithAI } from "./openai";
-import { SchedulingInput, SchedulingOutput, TimeSlot } from "./types";
+import { SchedulingInput, SchedulingOutput, Task, TimeSlot } from "./types";
+import { supabase } from "./supabase";
+import { safeCreateCalendarEvent, safeUpdateCalendarEvent } from "./google-calendar";
+import { scheduleTaskReminder } from "./notifications";
+import { format, isAfter, isBefore, startOfDay } from "date-fns";
 
 /**
  * MAIN FUNCTION: Schedule a task using two-stage hybrid approach
@@ -69,6 +73,17 @@ export async function scheduleTask(
   );
 
   console.log(`[scheduleTask] Stage 2 complete: ${aiRanked.length} AI-ranked slots`);
+  console.log("=== AI SLOT RESULTS ===");
+  const fmtLocal = (iso: string) =>
+    new Date(iso).toLocaleString([], {
+      weekday: "short", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  aiRanked.forEach((slot, i) => {
+    console.log(`[${i + 1}] ${fmtLocal(slot.start)} → ${fmtLocal(slot.end)}`);
+    console.log(`    Reason: ${slot.reason}`);
+  });
+  console.log("=======================");
 
   // ========================================
   // RETURN FINAL RESULT
@@ -122,6 +137,70 @@ export async function getTopRecommendation(
 ): Promise<TimeSlot | null> {
   const result = await scheduleTask(input);
   return result.slots.length > 0 ? result.slots[0] : null;
+}
+
+/**
+ * Save a scheduled slot to Supabase and sync with Google Calendar.
+ * Shared utility used by BulkRescheduleModal and auto-reschedule.
+ */
+export async function saveScheduledSlot(task: Task, slot: TimeSlot): Promise<boolean> {
+  try {
+    let googleEventId = task.google_event_id;
+
+    if (googleEventId) {
+      await safeUpdateCalendarEvent(googleEventId, task.title, task.description, slot.start, slot.end);
+    } else {
+      const result = await safeCreateCalendarEvent(task.title, task.description, slot.start, slot.end);
+      if (result.success && result.eventId) {
+        googleEventId = result.eventId;
+      }
+    }
+
+    // Update due_date if:
+    // 1. No due_date exists, OR
+    // 2. Current due_date is already in the past (expired), OR
+    // 3. Slot is scheduled after the current due_date (would become immediately overdue)
+    // In all these cases, set due_date to the slot's day.
+    // Otherwise preserve the original deadline.
+    const slotDay = startOfDay(new Date(slot.start));
+    const today = startOfDay(new Date());
+    const currentDueDay = task.due_date ? startOfDay(new Date(task.due_date)) : null;
+    const newDueDate =
+      !currentDueDay ||
+      !isAfter(currentDueDay, today) ||   // today or past → update to slot day
+      isAfter(slotDay, currentDueDay)      // slot after due_date → bump forward
+        ? format(slotDay, "yyyy-MM-dd")
+        : task.due_date;
+
+    const updateData: Record<string, unknown> = {
+      scheduled_start: slot.start,
+      scheduled_end: slot.end,
+      status: "scheduled",
+      due_date: newDueDate,
+    };
+
+    if (googleEventId && !task.google_event_id) {
+      updateData.google_event_id = googleEventId;
+    }
+
+    const { data: updatedTask, error: updateError } = await supabase
+      .from("tasks")
+      .update(updateData)
+      .eq("id", task.id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    if (updatedTask) {
+      await scheduleTaskReminder(updatedTask as Task);
+    }
+
+    return true;
+  } catch (err) {
+    console.error("[Scheduling] saveScheduledSlot error:", err);
+    return false;
+  }
 }
 
 /**
