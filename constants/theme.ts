@@ -1,94 +1,59 @@
-/**
- * TailoredTime - Theme Configuration
- *
- * Configures React Native Paper's Material Design 3 theme
- * with TailoredTime brand colors.
- *
- * Paper automatically generates color variants (light, dark, container, etc.)
- * from the primary, secondary, and tertiary colors you provide.
- */
+import { MD3LightTheme, MD3DarkTheme } from 'react-native-paper';
 
-import { MD3LightTheme, MD3DarkTheme } from "react-native-paper";
-
-/**
- * Light theme configuration
- * Uses Material Design 3 with TailoredTime brand colors
- */
-export const lightTheme = {
+const lightTheme = {
   ...MD3LightTheme,
   colors: {
     ...MD3LightTheme.colors,
-    primary: "#2563eb", // TailoredTime blue
-    secondary: "#8b5cf6", // TailoredTime purple
-    tertiary: "#06b6d4", // TailoredTime cyan
-    // Paper auto-generates:
-    // - primaryContainer, onPrimary, onPrimaryContainer
-    // - secondaryContainer, onSecondary, onSecondaryContainer
-    // - tertiaryContainer, onTertiary, onTertiaryContainer
-    // - error, background, surface, outline, etc.
+    primary: '#4A90E2', // Serene Blue
+    secondary: '#7C6FBF', // Soft Purple
+    tertiary: '#62C4D8', // Cyan
+    error: '#E25555', // Soft Red
+    background: '#F8F9FB', // Off-white
+    surface: '#FFFFFF', // White cards
+    surfaceVariant: '#F1F3F5', // Subtle cards
+    onPrimary: '#FFFFFF', // Text on primary
+    onSecondary: '#FFFFFF', // Text on secondary
+    onBackground: '#2C3E50', // Text on background
+    onSurface: '#2C3E50', // Text on surface
+    outline: '#E1E4E8', // Borders
+    // Custom colors
+    success: '#5FBF73',
+    warning: '#F5A962',
+    info: '#62C4D8',
+    // Task status
+    scheduled: '#4A90E2',
+    completed: '#5FBF73',
+    overdue: '#E25555',
+    pending: '#9CA3AF',
   },
 };
 
-/**
- * Dark theme configuration
- * Will be used when user enables dark mode
- */
-export const darkTheme = {
+const darkTheme = {
   ...MD3DarkTheme,
   colors: {
     ...MD3DarkTheme.colors,
-    primary: "#3b82f6", // Slightly lighter blue for dark mode
-    secondary: "#a78bfa", // Slightly lighter purple for dark mode
-    tertiary: "#22d3ee", // Slightly lighter cyan for dark mode
+    primary: '#6FA8EA', // Lighter blue for dark mode
+    secondary: '#9B8DD4', // Lighter purple
+    tertiary: '#7DD3DE', // Lighter cyan
+    error: '#FF6B6B', // Brighter red for dark
+    background: '#1A1D23', // Dark background
+    surface: '#25282E', // Dark cards
+    surfaceVariant: '#2F3239', // Subtle dark cards
+    onPrimary: '#1A1D23', // Dark text on primary
+    onSecondary: '#1A1D23', // Dark text on secondary
+    onBackground: '#E1E4E8', // Light text on dark bg
+    onSurface: '#E1E4E8', // Light text on dark surface
+    outline: '#3F4349', // Dark borders
+    // Custom colors (adjusted for dark mode)
+    success: '#6FCF8D',
+    warning: '#FFB974',
+    info: '#7DD3DE',
+    // Task status (adjusted for dark mode)
+    scheduled: '#6FA8EA',
+    completed: '#6FCF8D',
+    overdue: '#FF6B6B',
+    pending: '#6B7280',
   },
 };
 
-/**
- * Custom colors for app-specific use cases
- * Use these when Paper's built-in colors don't fit
- */
-export const customColors = {
-  // Task priority badge colors
-  priorityLow: "#10b981", // Green
-  priorityMedium: "#f59e0b", // Amber
-  priorityHigh: "#ef4444", // Red
-
-  // Task status colors
-  statusPending: "#94a3b8", // Slate-400
-  statusScheduled: "#3b82f6", // Blue-500
-  statusCompleted: "#10b981", // Green-500
-  statusOverdue: "#ef4444", // Red-500
-  statusCancelled: "#64748b", // Slate-500
-};
-
-/**
- * Typography scale (optional - Paper has defaults)
- * Only add if you need custom font sizes
- */
-export const typography = {
-  // You can customize these later if needed
-  // For now, Paper's defaults are good
-};
-
-/**
- * Spacing scale (consistent spacing throughout app)
- */
-export const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 16,
-  lg: 24,
-  xl: 32,
-  xxl: 48,
-};
-
-/**
- * Border radius values
- */
-export const borderRadius = {
-  sm: 4,
-  md: 8,
-  lg: 12,
-  xl: 16,
-  full: 9999,
-};
+export { lightTheme, darkTheme };
