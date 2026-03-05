@@ -39,12 +39,24 @@ export interface PersonalityData {
   // 6. STRUCTURE FLEXIBILITY (rescheduling behavior)
   structure_preference: number; // 0 = Rigid schedule → 100 = Fluid/adaptive
 
+  // OPTIONAL: Peak energy windows (replaces chronotype slider in UI; max 2 entries)
+  peak_windows?: Array<{
+    start: number; // hour 0-23 (inclusive start)
+    end: number;   // hour 0-23 (exclusive end, e.g. {start:9,end:12} = 9am–12pm)
+  }>;
+
   // OPTIONAL: User-defined work windows (manual override, not required in onboarding)
   preferred_windows?: Array<{
     day: number; // 0-6 (0=Sunday, 1=Monday, ..., 6=Saturday)
     start: string; // HH:MM format (e.g., "09:00")
     end: string; // HH:MM format (e.g., "17:00")
   }>;
+
+  // OPTIONAL: Auto-reschedule settings (twice daily)
+  auto_reschedule_enabled?: boolean; // Default: true
+  auto_reschedule_morning?: number;  // Minutes from midnight (0-1439), default 540 (9:00am)
+  auto_reschedule_evening?: number;  // Minutes from midnight (0-1439), default 1140 (7:00pm)
+  auto_reschedule_tz_offset?: number; // Device UTC offset in hours (e.g. -5 for EST, 5.5 for IST)
 
   // OPTIONAL: Free-form context (captured in Settings, not onboarding)
   additional_context?: string; // Max 500 chars, e.g., "I have ADHD and need visual timers"
@@ -95,6 +107,17 @@ export type TaskStatus =
 export type TaskPriority = "low" | "medium" | "high";
 
 /**
+ * Task type - cognitive demands for energy-based scheduling
+ * Used to match tasks with appropriate times based on energy levels
+ */
+export type TaskType =
+  | "deep_work"      // High cognitive load, needs peak energy (coding, writing, analysis)
+  | "admin"          // Low cognitive load, routine tasks (emails, filing, data entry)
+  | "creative"       // Creative work, needs mental freshness (brainstorming, design)
+  | "communication"  // Meetings, calls, collaborative work
+  | "quick_task";    // 5-15 min tasks, can be done anytime
+
+/**
  * Core task object
  */
 export interface Task {
@@ -103,13 +126,13 @@ export interface Task {
   title: string; // Task name (max 200 chars)
   description?: string; // Optional details
   scheduling_method: SchedulingMethod;
-  auto_reschedule: boolean; // If true, app auto-reschedules when missed
   due_date?: string; // ISO 8601 timestamp (deadline)
   duration_minutes: number; // How long the task takes (5-480 mins)
   scheduled_start?: string; // ISO 8601 timestamp (when task is scheduled)
   scheduled_end?: string; // ISO 8601 timestamp (calculated from start + duration)
   status: TaskStatus;
   priority: TaskPriority;
+  task_type?: TaskType; // Cognitive type for energy-based scheduling
   google_event_id?: string; // ID of synced Google Calendar event
   created_at: string; // ISO 8601 timestamp
   updated_at: string; // ISO 8601 timestamp
@@ -127,6 +150,7 @@ export interface Task {
   recurrence_rule?: RecurrenceRule; // Recurrence pattern
   recurrence_parent_id?: string; // UUID of parent recurring task (for instances)
   instance_date?: string; // ISO date string for which occurrence this represents
+  auto_reschedule?: boolean; // If false, never auto-reschedule this task
 }
 
 /**
@@ -146,10 +170,10 @@ export type CreateTaskInput = Pick<
   | "title"
   | "description"
   | "scheduling_method"
-  | "auto_reschedule"
   | "due_date"
   | "duration_minutes"
   | "priority"
+  | "task_type"
   | "parent_task_id"
   | "tags"
   | "is_recurring"
@@ -194,6 +218,17 @@ export interface TimeSlot {
   end: string; // ISO 8601 timestamp
   score: number; // 0-100, how well this slot matches user's personality
   reason: string; // AI-generated explanation (e.g., "This is during your peak focus time")
+  factors?: SchedulingFactor[]; // Breakdown of factors that influenced the score
+}
+
+/**
+ * Individual factor that influenced a slot's score
+ */
+export interface SchedulingFactor {
+  name: string; // Factor name (e.g., "chronotype", "deadline_style")
+  impact: number; // Score impact (-40 to +15)
+  description: string; // Human-readable explanation
+  icon?: string; // Optional icon name
 }
 
 // ===========================================
@@ -393,7 +428,6 @@ export interface TaskFormState {
   due_date: Date | null;
   priority: TaskPriority;
   scheduling_method: SchedulingMethod;
-  auto_reschedule: boolean;
 }
 
 /**
@@ -417,3 +451,235 @@ export type RootStackParamList = {
   "(tabs)/add-task": { taskId?: string }; // Optional taskId for editing
   "(tabs)/settings": undefined;
 };
+
+// ===========================================
+// SUBSCRIPTION TYPES
+// ===========================================
+
+/**
+ * Available subscription plan IDs
+ */
+export type PlanId = 'free' | 'pro_monthly' | 'pro_yearly';
+
+/**
+ * Subscription status
+ */
+export type SubscriptionStatus = 'active' | 'cancelled' | 'expired' | 'trial';
+
+/**
+ * User subscription record
+ */
+export interface UserSubscription {
+  id: string;
+  user_id: string;
+  plan_id: PlanId;
+  status: SubscriptionStatus;
+  trial_ends_at: string | null;
+  current_period_start: string | null;
+  current_period_end: string | null;
+  cancel_at_period_end: boolean;
+  revenuecat_customer_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Features available for each plan
+ */
+export interface PlanFeatures {
+  ai_scheduling: boolean;
+  recurring_tasks: number;       // -1 = unlimited
+  task_history_days: number;     // -1 = unlimited
+  auto_reschedule_per_week: number; // -1 = unlimited, 1 = free tier
+}
+
+/**
+ * Subscription plan details
+ */
+export interface SubscriptionPlan {
+  id: PlanId;
+  name: string;
+  price_cents: number;
+  interval: 'month' | 'year' | null;
+  features: PlanFeatures;
+}
+
+// ===========================================
+// ANALYTICS TYPES
+// ===========================================
+
+/**
+ * Analytics event names
+ */
+export type AnalyticsEventName =
+  | 'task_created'
+  | 'task_completed'
+  | 'task_scheduled'
+  | 'task_deleted'
+  | 'scheduling_method_selected'
+  | 'onboarding_started'
+  | 'onboarding_completed'
+  | 'paywall_viewed'
+  | 'paywall_dismissed'
+  | 'purchase_started'
+  | 'purchase_completed'
+  | 'purchase_failed'
+  | 'purchase_restored'
+  | 'trial_started'
+  | 'trial_ended'
+  | 'calendar_synced'
+  | 'calendar_sync_failed'
+  | 'app_opened'
+  | 'app_backgrounded'
+  // Review & Feedback events
+  | 'happiness_check_shown'
+  | 'happiness_response'
+  | 'review_submitted'
+  | 'feedback_submitted'
+  | 'feedback_skipped'
+  | 'review_trial_granted'
+  // Onboarding & guided tour events
+  | 'onboarding_step_completed'
+  | 'guided_tour_started'
+  | 'guided_tour_completed';
+
+/**
+ * User funnel tracking record
+ */
+export interface UserFunnel {
+  user_id: string;
+  installed_at: string;
+  onboarding_completed_at: string | null;
+  first_task_at: string | null;
+  first_schedule_at: string | null;
+  first_completion_at: string | null;
+  converted_to_paid_at: string | null;
+  day_7_active: boolean;
+  day_30_active: boolean;
+}
+
+/**
+ * Analytics event record
+ */
+export interface AnalyticsEvent {
+  id: string;
+  user_id: string;
+  event_name: AnalyticsEventName;
+  event_data: Record<string, any> | null;
+  created_at: string;
+}
+
+// ===========================================
+// USER STATS TYPES
+// ===========================================
+
+/**
+ * User stats returned by get_user_stats() function
+ */
+export interface UserStats {
+  tasks_completed_today: number;
+  tasks_completed_yesterday: number;
+  tasks_completed_week: number;
+  tasks_total_week: number;
+  tasks_completed_month: number;
+  tasks_completed_last_month: number;
+  total_tasks: number;
+  total_completed: number;
+  smart_scheduled_count: number;
+  manual_scheduled_count: number;
+  current_streak: number;
+  best_streak: number;
+  completion_rate: number; // 0-100 percentage (last 30 days)
+}
+
+/**
+ * Daily completion data for trend chart (Pro)
+ */
+export interface DailyCompletion {
+  date: string; // YYYY-MM-DD
+  count: number;
+}
+
+/**
+ * Hourly productivity data (Pro only)
+ */
+export interface HourlyProductivity {
+  hour: number; // 0-23
+  count: number;
+}
+
+/**
+ * Weekday productivity data (Pro only)
+ */
+export interface WeekdayProductivity {
+  day: number; // 0-6 (Sunday-Saturday)
+  day_name: string; // "Sun", "Mon", etc.
+  count: number;
+}
+
+// ===========================================
+// FEEDBACK TYPES
+// ===========================================
+
+/**
+ * Feedback category options
+ */
+export type FeedbackCategory =
+  | 'missing_feature'
+  | 'bug'
+  | 'hard_to_use'
+  | 'ai_issue'
+  | 'calendar_issue'
+  | 'pricing'
+  | 'other';
+
+/**
+ * Trigger point for feedback submission
+ */
+export type FeedbackTriggerPoint = 'review_flow' | 'settings';
+
+/**
+ * Sentiment classification
+ */
+export type FeedbackSentiment = 'positive' | 'neutral' | 'negative';
+
+/**
+ * Feedback submission data
+ */
+export interface FeedbackData {
+  category: FeedbackCategory;
+  subcategory?: string;
+  trigger_point: FeedbackTriggerPoint;
+  sentiment?: FeedbackSentiment;
+  rating?: number; // 1-5
+  text_feedback?: string;
+  user_email?: string;
+  wants_follow_up?: boolean;
+  include_logs?: boolean;
+}
+
+/**
+ * Device info for feedback metadata
+ */
+export interface DeviceInfo {
+  platform: string; // 'ios' | 'android'
+  os_version: string;
+  device_model: string;
+  app_version: string;
+}
+
+/**
+ * Happiness check response options
+ */
+export type HappinessResponse = 'loving_it' | 'its_okay';
+
+/**
+ * Extended user funnel with review tracking
+ */
+export interface UserFunnelWithReview extends UserFunnel {
+  review_request_shown: boolean;
+  review_request_shown_at: string | null;
+  review_submitted: boolean;
+  review_submitted_at: string | null;
+  happiness_response: HappinessResponse | null;
+}
