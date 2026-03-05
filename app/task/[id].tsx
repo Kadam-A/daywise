@@ -20,23 +20,23 @@ import {
   ActivityIndicator,
   Checkbox,
   TextInput,
+  useTheme,
 } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { router, useLocalSearchParams, useFocusEffect } from "expo-router";
-import { format, addDays } from "date-fns";
+import { format, addDays, endOfDay, isAfter, startOfDay } from "date-fns";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { supabase } from "@/lib/supabase";
 import { Task, TimeSlot, UserProfile, CalendarEvent } from "@/lib/types";
 import SchedulingModal from "@/components/SchedulingModal";
 import { scheduleTask } from "@/lib/scheduling";
 import {
-  isGoogleCalendarConnected,
-  createGoogleCalendarEvent,
-  updateGoogleCalendarEvent,
-  deleteGoogleCalendarEvent,
+  safeCreateCalendarEvent,
+  safeUpdateCalendarEvent,
+  safeDeleteCalendarEvent,
 } from "@/lib/google-calendar";
 import { scheduleTaskReminder, cancelTaskReminder } from "@/lib/notifications";
 import {
@@ -44,28 +44,48 @@ import {
   isRecurringInstance,
   getRecurrenceDescription,
 } from "@/lib/recurrence";
+import { useNetwork } from "@/contexts/NetworkContext";
+import { useAppColors } from "@/contexts/ThemeContext";
+import { queueOperation } from "@/lib/offline";
+import { trackTaskCompleted, trackFeedbackSkipped } from "@/lib/analytics";
+import {
+  incrementCompletedTaskCount,
+  checkHappinessFlowEligibility,
+  onHappinessCheckShown,
+  handleHappinessResponse,
+  handleFeedbackFormComplete,
+} from "@/lib/review";
+import HappinessCheckModal from "@/components/HappinessCheckModal";
+import FeedbackFormModal from "@/components/FeedbackFormModal";
+import SchedulingFeedbackModal from "@/components/SchedulingFeedbackModal";
+import Toast from "react-native-toast-message";
+import { HappinessResponse } from "@/lib/types";
 
-// Design System
+// Static colors for StyleSheet (can't use useTheme in StyleSheet.create)
 const COLORS = {
-  gradientStart: "#4A90E2",
-  gradientEnd: "#7C6FBF",
+  primary: "#4A90E2",
+  secondary: "#7C6FBF",
   background: "#F8F9FB",
   surface: "#FFFFFF",
   textPrimary: "#1A1D23",
   textSecondary: "#5C6370",
   textTertiary: "#9CA3AF",
+  success: "#5FBF73",
+  warning: "#F5A962",
+  error: "#E25555",
   border: "#E5E7EB",
   priorityHigh: "#E25555",
   priorityMedium: "#F5A962",
   priorityLow: "#5FBF73",
-  success: "#5FBF73",
-  error: "#E25555",
   aiPurple: "#7C6FBF",
-  aiPurpleLight: "#E8E5F5",
+  aiPurpleLight: "#F3F0FF",
 };
 
 export default function TaskDetailScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { colors } = useTheme();
+  const appColors = useAppColors();
+  const { id, reschedule } = useLocalSearchParams<{ id: string; reschedule?: string }>();
+  const { isConnected } = useNetwork();
 
   // Navigate back to home
   const goBack = () => {
@@ -97,6 +117,7 @@ export default function TaskDetailScreen() {
   const [addingSubtask, setAddingSubtask] = useState(false);
 
   // Reschedule modal state
+  const [rescheduleMethod, setRescheduleMethod] = useState<"SMART" | "MANUAL" | null>(null);
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
   const [rescheduleSlots, setRescheduleSlots] = useState<TimeSlot[]>([]);
   const [rescheduleLoading, setRescheduleLoading] = useState(false);
@@ -105,12 +126,34 @@ export default function TaskDetailScreen() {
     { start: string; end: string; title: string }[]
   >([]);
 
+  // Happiness check / review flow state
+  const [showHappinessCheck, setShowHappinessCheck] = useState(false);
+  const [showFeedbackForm, setShowFeedbackForm] = useState(false);
+  const [happinessTasksCompleted, setHappinessTasksCompleted] = useState(5);
+
+  // Scheduling feedback modal state (shown for AI-scheduled tasks)
+  const [showSchedulingFeedback, setShowSchedulingFeedback] = useState(false);
+
+  // Track whether reschedule modal has already been opened via ?reschedule=true
+  const rescheduleModalOpened = useRef(false);
+
   // Load task on focus
   useFocusEffect(
     useCallback(() => {
       loadTask();
     }, [id])
   );
+
+  // Auto-trigger reschedule if navigated with ?reschedule=true (once only)
+  useEffect(() => {
+    if (reschedule === "true" && task && !loading && !rescheduleModalOpened.current) {
+      rescheduleModalOpened.current = true;
+      setRescheduleMethod(null);
+      setRescheduleSlots([]);
+      setRescheduleError(null);
+      setShowRescheduleModal(true);
+    }
+  }, [reschedule, task?.id, loading]);
 
   const loadTask = async () => {
     if (!id) return;
@@ -202,12 +245,17 @@ export default function TaskDetailScreen() {
   const handleDateChange = (event: any, selectedDate?: Date) => {
     setShowDatePicker(Platform.OS === "ios");
     if (selectedDate) {
-      setEditDueDate(selectedDate);
+      setEditDueDate(endOfDay(selectedDate));
     }
   };
 
   const saveEdits = async () => {
     if (!task || !editTitle.trim()) return;
+
+    if (!editDueDate) {
+      Alert.alert("Due Date Required", "Every task needs a due date for scheduling");
+      return;
+    }
 
     const durationNum = parseInt(editDuration);
     if (isNaN(durationNum) || durationNum < 5 || durationNum > 480) {
@@ -226,7 +274,7 @@ export default function TaskDetailScreen() {
           duration_minutes: durationNum,
           priority: editPriority,
           tags: editTags.length > 0 ? editTags : [],
-          due_date: editDueDate?.toISOString() || null,
+          due_date: editDueDate!.toISOString(),
           scheduling_method: editSchedulingMethod,
         })
         .eq("id", task.id)
@@ -253,6 +301,17 @@ export default function TaskDetailScreen() {
 
       // Cancel any scheduled notification
       await cancelTaskReminder(task.id);
+
+      // Optimistic update
+      setTask({ ...task, status: "completed" });
+
+      if (!isConnected) {
+        // Queue operation for when back online
+        await queueOperation("complete_task", { taskId: task.id });
+        console.log("[TaskDetail] Queued complete_task for offline sync");
+        goBack();
+        return;
+      }
 
       const { error } = await supabase
         .from("tasks")
@@ -283,10 +342,33 @@ export default function TaskDetailScreen() {
         }
       }
 
+      // Track analytics
+      await trackTaskCompleted();
+      await incrementCompletedTaskCount();
+
+      // Show scheduling feedback modal for AI-scheduled tasks
+      if (task.scheduling_method === "SMART" && task.scheduled_start) {
+        setShowSchedulingFeedback(true);
+        // Don't proceed yet - wait for feedback modal
+        return;
+      }
+
+      // Check if eligible for happiness check flow
+      const eligibility = await checkHappinessFlowEligibility();
+      if (eligibility.eligible) {
+        // Show happiness check modal instead of going back immediately
+        setHappinessTasksCompleted(eligibility.tasksCompleted);
+        setShowHappinessCheck(true);
+        // Don't go back yet - wait for modal response
+        return;
+      }
+
       // Go back after completing
       goBack();
     } catch (err) {
       console.error("[TaskDetail] Complete error:", err);
+      // Revert optimistic update
+      setTask({ ...task, status: task.status });
       Alert.alert("Error", "Failed to complete task");
     } finally {
       setActionLoading(false);
@@ -317,16 +399,19 @@ export default function TaskDetailScreen() {
       // Cancel any scheduled notification
       await cancelTaskReminder(task.id);
 
-      // Delete Google Calendar event if exists
+      if (!isConnected) {
+        // Queue operation for when back online
+        await queueOperation("delete_task", { taskId: task.id });
+        console.log("[TaskDetail] Queued delete_task for offline sync");
+        goBack();
+        return;
+      }
+
+      // Delete Google Calendar event if exists using safe function
       if (task.google_event_id) {
-        try {
-          const isCalendarConnected = await isGoogleCalendarConnected();
-          if (isCalendarConnected) {
-            await deleteGoogleCalendarEvent(task.google_event_id);
-          }
-        } catch (calError) {
-          console.warn("[TaskDetail] Failed to delete calendar event:", calError);
-          // Continue with task deletion even if calendar delete fails
+        const result = await safeDeleteCalendarEvent(task.google_event_id);
+        if (!result.success && result.needsRetry) {
+          console.log("[TaskDetail] Calendar delete pending, will retry later");
         }
       }
 
@@ -343,12 +428,19 @@ export default function TaskDetailScreen() {
     }
   };
 
-  const handleReschedule = async () => {
+  const handleReschedule = () => {
     if (!task) return;
-
+    setRescheduleMethod(null);
+    setRescheduleSlots([]);
+    setRescheduleError(null);
     setShowRescheduleModal(true);
+  };
 
-    if (task.scheduling_method === "SMART") {
+  const handleMethodChoice = async (method: "SMART" | "MANUAL") => {
+    if (!task) return;
+    setRescheduleMethod(method);
+
+    if (method === "SMART") {
       await runSmartReschedule();
     } else {
       await loadBusySlots();
@@ -375,7 +467,6 @@ export default function TaskDetailScreen() {
         duration_minutes: 15, // Default 15 min for subtasks
         priority: task.priority,
         scheduling_method: "MANUAL",
-        auto_reschedule: false,
         status: "pending_schedule",
       };
 
@@ -438,6 +529,88 @@ export default function TaskDetailScreen() {
     return completed / subtasks.length;
   };
 
+  // Happiness check flow handlers
+  const onHappinessResponse = async (response: HappinessResponse) => {
+    // Mark as shown and track
+    await onHappinessCheckShown();
+
+    // Handle the response
+    const result = await handleHappinessResponse(response);
+
+    if (result.action === "show_native_review") {
+      // Happy user - native review already triggered, show thank you
+      setShowHappinessCheck(false);
+      if (result.trialGranted) {
+        Toast.show({
+          type: "success",
+          text1: "Thanks for your support!",
+          text2: "Enjoy 7 days of Pro features",
+          position: "bottom",
+          visibilityTime: 3000,
+        });
+      }
+      // Go back after a short delay to let user see the toast
+      setTimeout(() => goBack(), 500);
+    } else {
+      // Unhappy user - show feedback form
+      setShowHappinessCheck(false);
+      setShowFeedbackForm(true);
+    }
+  };
+
+  const onFeedbackSubmit = async () => {
+    // User submitted feedback
+    const result = await handleFeedbackFormComplete(true);
+    setShowFeedbackForm(false);
+
+    if (result.trialGranted) {
+      Toast.show({
+        type: "success",
+        text1: "Thanks for your feedback!",
+        text2: "Enjoy 7 days of Pro features",
+        position: "bottom",
+        visibilityTime: 3000,
+      });
+    }
+
+    setTimeout(() => goBack(), 500);
+  };
+
+  const onFeedbackSkip = async () => {
+    // User skipped feedback but still gets trial
+    await trackFeedbackSkipped();
+    const result = await handleFeedbackFormComplete(false);
+    setShowFeedbackForm(false);
+
+    if (result.trialGranted) {
+      Toast.show({
+        type: "success",
+        text1: "Thanks anyway!",
+        text2: "Enjoy 7 days of Pro features",
+        position: "bottom",
+        visibilityTime: 3000,
+      });
+    }
+
+    setTimeout(() => goBack(), 500);
+  };
+
+  // Handler for when scheduling feedback modal is complete
+  const onSchedulingFeedbackComplete = async () => {
+    setShowSchedulingFeedback(false);
+
+    // Now check if eligible for happiness check flow
+    const eligibility = await checkHappinessFlowEligibility();
+    if (eligibility.eligible) {
+      setHappinessTasksCompleted(eligibility.tasksCompleted);
+      setShowHappinessCheck(true);
+      return;
+    }
+
+    // Otherwise go back
+    goBack();
+  };
+
   const getSubtaskProgressText = () => {
     const completed = subtasks.filter((s) => s.status === "completed").length;
     return `${completed}/${subtasks.length} complete`;
@@ -482,12 +655,16 @@ export default function TaskDetailScreen() {
         .gte("end_time", new Date().toISOString());
 
       // Run scheduling algorithm + AI
+      const daysUntilDue = task.due_date
+        ? Math.max(1, Math.ceil((new Date(task.due_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+        : 14;
+
       const result = await scheduleTask({
         task,
         userProfile: profile as UserProfile,
         existingEvents: (calendarEvents || []) as CalendarEvent[],
         existingTasks: (existingTasks || []) as Task[],
-        lookAheadDays: 14,
+        lookAheadDays: Math.min(daysUntilDue, 14),
       });
 
       setRescheduleSlots(result.slots);
@@ -561,40 +738,53 @@ export default function TaskDetailScreen() {
       setRescheduleLoading(true);
 
       let googleEventId = task.google_event_id;
-      const isCalendarConnected = await isGoogleCalendarConnected();
 
-      // Update or create Google Calendar event
-      if (isCalendarConnected) {
-        try {
-          if (googleEventId) {
-            // Update existing event
-            await updateGoogleCalendarEvent(
-              googleEventId,
-              task.title,
-              task.description,
-              slot.start,
-              slot.end
-            );
-          } else {
-            // Create new event
-            googleEventId = await createGoogleCalendarEvent(
-              task.title,
-              task.description,
-              slot.start,
-              slot.end
-            );
-          }
-        } catch (calError) {
-          console.warn("[TaskDetail] Calendar update failed:", calError);
-          // Continue with task update even if calendar fails
+      // Update or create Google Calendar event using safe functions
+      if (googleEventId) {
+        // Update existing event
+        const result = await safeUpdateCalendarEvent(
+          googleEventId,
+          task.title,
+          task.description,
+          slot.start,
+          slot.end
+        );
+        if (!result.success && result.needsRetry) {
+          console.log("[TaskDetail] Calendar update pending, will retry later");
+        }
+      } else {
+        // Create new event
+        const result = await safeCreateCalendarEvent(
+          task.title,
+          task.description,
+          slot.start,
+          slot.end
+        );
+        if (result.success && result.eventId) {
+          googleEventId = result.eventId;
+        } else if (result.needsRetry) {
+          console.log("[TaskDetail] Calendar create pending, will retry later");
         }
       }
+
+      // Update due_date: set to slot day if due_date is today/past or slot is after due_date,
+      // otherwise preserve the original deadline.
+      const slotDay = startOfDay(new Date(slot.start));
+      const today = startOfDay(new Date());
+      const currentDueDay = task.due_date ? startOfDay(new Date(task.due_date)) : null;
+      const newDueDate =
+        !currentDueDay ||
+        !isAfter(currentDueDay, today) ||
+        isAfter(slotDay, currentDueDay)
+          ? format(slotDay, "yyyy-MM-dd")
+          : task.due_date;
 
       // Update task with scheduled time
       const updateData: Record<string, unknown> = {
         scheduled_start: slot.start,
         scheduled_end: slot.end,
         status: "scheduled",
+        due_date: newDueDate,
       };
 
       if (googleEventId && !task.google_event_id) {
@@ -616,6 +806,13 @@ export default function TaskDetailScreen() {
       }
 
       setShowRescheduleModal(false);
+
+      // If navigated here with ?reschedule=true, go back to home after success
+      if (reschedule === "true") {
+        goBack();
+        return;
+      }
+
       loadTask(); // Reload task with new time
     } catch (err) {
       console.error("[TaskDetail] Reschedule update error:", err);
@@ -649,28 +846,28 @@ export default function TaskDetailScreen() {
   const getPriorityColor = (priority: string) => {
     switch (priority) {
       case "high":
-        return "#f44336";
+        return appColors.priorityHigh;
       case "medium":
-        return "#ff9800";
+        return appColors.priorityMedium;
       case "low":
-        return "#4caf50";
+        return appColors.priorityLow;
       default:
-        return "#9e9e9e";
+        return appColors.textTertiary;
     }
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
       case "scheduled":
-        return "#2196f3";
+        return appColors.primary;
       case "completed":
-        return "#4caf50";
+        return appColors.success;
       case "overdue":
-        return "#f44336";
+        return appColors.error;
       case "pending_schedule":
-        return "#ff9800";
+        return appColors.warning;
       default:
-        return "#9e9e9e";
+        return appColors.textTertiary;
     }
   };
 
@@ -691,19 +888,19 @@ export default function TaskDetailScreen() {
 
   const getPriorityConfig = (priority: string) => {
     switch (priority) {
-      case "high": return { color: COLORS.priorityHigh, label: "High", icon: "flag-variant" };
-      case "medium": return { color: COLORS.priorityMedium, label: "Medium", icon: "flag" };
-      case "low": return { color: COLORS.priorityLow, label: "Low", icon: "flag-outline" };
-      default: return { color: COLORS.textTertiary, label: priority, icon: "flag-outline" };
+      case "high": return { color: appColors.priorityHigh, label: "High", icon: "flag-variant" };
+      case "medium": return { color: appColors.priorityMedium, label: "Medium", icon: "flag" };
+      case "low": return { color: appColors.priorityLow, label: "Low", icon: "flag-outline" };
+      default: return { color: appColors.textTertiary, label: priority, icon: "flag-outline" };
     }
   };
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={[styles.container, { backgroundColor: appColors.background }]}>
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.gradientStart} />
-          <Text style={styles.loadingText}>Loading task...</Text>
+          <ActivityIndicator size="large" color={appColors.primary} />
+          <Text style={[styles.loadingText, { color: appColors.textSecondary }]}>Loading task...</Text>
         </View>
       </SafeAreaView>
     );
@@ -711,10 +908,10 @@ export default function TaskDetailScreen() {
 
   if (!task) {
     return (
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={[styles.container, { backgroundColor: appColors.background }]}>
         <View style={styles.loadingContainer}>
-          <Text style={styles.notFoundText}>Task not found</Text>
-          <Pressable style={styles.goBackButton} onPress={() => goBack()}>
+          <Text style={[styles.notFoundText, { color: appColors.textSecondary }]}>Task not found</Text>
+          <Pressable style={[styles.goBackButton, { backgroundColor: appColors.primary }]} onPress={() => goBack()}>
             <Text style={styles.goBackText}>Go Back</Text>
           </Pressable>
         </View>
@@ -725,46 +922,48 @@ export default function TaskDetailScreen() {
   const priorityConfig = getPriorityConfig(task.priority);
 
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: appColors.background }]} edges={["top"]}>
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
       >
         {/* Header */}
-        <View style={styles.header}>
+        <View style={[styles.header, { backgroundColor: appColors.surface, borderBottomColor: appColors.border }]}>
           <Pressable onPress={() => goBack()} style={styles.backButton}>
-            <MaterialCommunityIcons name="arrow-left" size={24} color={COLORS.textPrimary} />
+            <MaterialCommunityIcons name="arrow-left" size={24} color={appColors.textPrimary} />
           </Pressable>
-          <Text style={styles.headerTitle}>
+          <Text style={[styles.headerTitle, { color: appColors.textPrimary }]}>
             {isEditing ? "Edit Task" : "Task Details"}
           </Text>
           {isEditing ? (
             <Pressable onPress={cancelEditing} style={styles.headerAction}>
-              <Text style={styles.cancelText}>Cancel</Text>
+              <Text style={[styles.cancelText, { color: appColors.textSecondary }]}>Cancel</Text>
             </Pressable>
           ) : (
             <Pressable onPress={startEditing} style={styles.headerAction}>
-              <MaterialCommunityIcons name="pencil" size={22} color={COLORS.gradientStart} />
+              <MaterialCommunityIcons name="pencil" size={22} color={appColors.primary} />
             </Pressable>
           )}
         </View>
 
         <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
           {/* Title Section */}
-          <View style={styles.titleSection}>
+          <View style={[styles.titleSection, { backgroundColor: appColors.surface }]}>
             {isEditing ? (
               <TextInput
                 value={editTitle}
                 onChangeText={setEditTitle}
-                style={styles.editTitleInput}
+                style={[styles.editTitleInput, { color: appColors.textPrimary }]}
                 mode="flat"
                 placeholder="Task title"
+                placeholderTextColor={appColors.textTertiary}
                 underlineColor="transparent"
                 activeUnderlineColor="transparent"
-                cursorColor={COLORS.gradientStart}
+                cursorColor={appColors.primary}
+                textColor={appColors.textPrimary}
               />
             ) : (
-              <Text style={styles.title}>{task.title}</Text>
+              <Text style={[styles.title, { color: appColors.textPrimary }]}>{task.title}</Text>
             )}
 
             {/* Status badges */}
@@ -777,9 +976,9 @@ export default function TaskDetailScreen() {
                   </Text>
                 </View>
                 {(task.is_recurring || isRecurringInstance(task)) && (
-                  <View style={[styles.badge, { backgroundColor: COLORS.aiPurpleLight }]}>
-                    <MaterialCommunityIcons name="repeat" size={12} color={COLORS.aiPurple} />
-                    <Text style={[styles.badgeText, { color: COLORS.aiPurple }]}>
+                  <View style={[styles.badge, { backgroundColor: appColors.aiPurpleLight }]}>
+                    <MaterialCommunityIcons name="repeat" size={12} color={appColors.aiPurple} />
+                    <Text style={[styles.badgeText, { color: appColors.aiPurple }]}>
                       {task.recurrence_rule ? getRecurrenceDescription(task.recurrence_rule) : "Recurring"}
                     </Text>
                   </View>
@@ -789,10 +988,10 @@ export default function TaskDetailScreen() {
           </View>
 
           {/* Priority Selection (Edit mode) or Display */}
-          <View style={styles.card}>
+          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
             <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="flag" size={18} color={COLORS.textTertiary} />
-              <Text style={styles.cardLabel}>Priority</Text>
+              <MaterialCommunityIcons name="flag" size={18} color={appColors.textSecondary} />
+              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Priority</Text>
             </View>
             {isEditing ? (
               <View style={styles.priorityOptions}>
@@ -804,6 +1003,7 @@ export default function TaskDetailScreen() {
                       key={p}
                       style={[
                         styles.priorityOption,
+                        { backgroundColor: appColors.inputBg },
                         isSelected && { backgroundColor: `${config.color}15`, borderColor: config.color }
                       ]}
                       onPress={() => setEditPriority(p)}
@@ -811,9 +1011,9 @@ export default function TaskDetailScreen() {
                       <MaterialCommunityIcons
                         name={config.icon as any}
                         size={18}
-                        color={isSelected ? config.color : COLORS.textTertiary}
+                        color={isSelected ? config.color : appColors.textTertiary}
                       />
-                      <Text style={[styles.priorityOptionText, isSelected && { color: config.color }]}>
+                      <Text style={[styles.priorityOptionText, { color: appColors.textTertiary }, isSelected && { color: config.color }]}>
                         {config.label}
                       </Text>
                     </Pressable>
@@ -832,14 +1032,14 @@ export default function TaskDetailScreen() {
 
           {/* Scheduled Time */}
           {task.scheduled_start && task.scheduled_end && !isEditing && (
-            <View style={styles.card}>
+            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
               <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="calendar-clock" size={18} color={COLORS.textTertiary} />
-                <Text style={styles.cardLabel}>Scheduled</Text>
+                <MaterialCommunityIcons name="calendar-clock" size={18} color={appColors.textSecondary} />
+                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Scheduled</Text>
               </View>
               <View style={styles.scheduleInfo}>
-                <Text style={styles.scheduleDate}>{formatDate(task.scheduled_start)}</Text>
-                <Text style={styles.scheduleTime}>
+                <Text style={[styles.scheduleDate, { color: appColors.textSecondary }]}>{formatDate(task.scheduled_start)}</Text>
+                <Text style={[styles.scheduleTime, { color: appColors.primary }]}>
                   {formatTimeRange(task.scheduled_start, task.scheduled_end)}
                 </Text>
               </View>
@@ -847,69 +1047,62 @@ export default function TaskDetailScreen() {
           )}
 
           {/* Duration */}
-          <View style={styles.card}>
+          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
             <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="timer-outline" size={18} color={COLORS.textTertiary} />
-              <Text style={styles.cardLabel}>Duration</Text>
+              <MaterialCommunityIcons name="timer-outline" size={18} color={appColors.textSecondary} />
+              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Duration</Text>
             </View>
             {isEditing ? (
               <View style={styles.durationEditRow}>
                 <TextInput
                   value={editDuration}
                   onChangeText={setEditDuration}
-                  style={styles.durationInput}
+                  style={[styles.durationInput, { backgroundColor: appColors.surface }]}
                   mode="outlined"
                   keyboardType="numeric"
-                  outlineColor={COLORS.border}
-                  activeOutlineColor={COLORS.gradientStart}
-                  cursorColor={COLORS.gradientStart}
+                  outlineColor={appColors.border}
+                  activeOutlineColor={appColors.primary}
+                  cursorColor={appColors.primary}
+                  textColor={appColors.textPrimary}
                   dense
                 />
-                <Text style={styles.durationUnit}>minutes</Text>
+                <Text style={[styles.durationUnit, { color: appColors.textSecondary }]}>minutes</Text>
               </View>
             ) : (
-              <Text style={styles.durationValue}>{task.duration_minutes} minutes</Text>
+              <Text style={[styles.durationValue, { color: appColors.textPrimary }]}>{task.duration_minutes} minutes</Text>
             )}
           </View>
 
           {/* Due Date - Edit mode */}
           {isEditing && (
-            <View style={styles.card}>
+            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
               <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="calendar" size={18} color={COLORS.textTertiary} />
-                <Text style={styles.cardLabel}>Due Date</Text>
+                <MaterialCommunityIcons name="calendar" size={18} color={appColors.textSecondary} />
+                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Due Date</Text>
               </View>
               <View style={styles.dueDateOptions}>
                 <Pressable
-                  style={[styles.dueDateChip, !editDueDate && styles.dueDateChipActive]}
-                  onPress={() => setEditDueDate(null)}
+                  style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") && { backgroundColor: appColors.primary }]}
+                  onPress={() => setEditDueDate(endOfDay(new Date()))}
                 >
-                  <Text style={[styles.dueDateChipText, !editDueDate && styles.dueDateChipTextActive]}>
-                    No deadline
-                  </Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.dueDateChip, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") && styles.dueDateChipActive]}
-                  onPress={() => setEditDueDate(new Date())}
-                >
-                  <Text style={[styles.dueDateChipText, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") && styles.dueDateChipTextActive]}>
+                  <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") && { color: "#FFFFFF" }]}>
                     Today
                   </Text>
                 </Pressable>
                 <Pressable
-                  style={[styles.dueDateChip, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") && styles.dueDateChipActive]}
-                  onPress={() => setEditDueDate(addDays(new Date(), 1))}
+                  style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") && { backgroundColor: appColors.primary }]}
+                  onPress={() => setEditDueDate(endOfDay(addDays(new Date(), 1)))}
                 >
-                  <Text style={[styles.dueDateChipText, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") && styles.dueDateChipTextActive]}>
+                  <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") && { color: "#FFFFFF" }]}>
                     Tomorrow
                   </Text>
                 </Pressable>
-                <Pressable style={styles.dueDateChip} onPress={() => setShowDatePicker(true)}>
-                  <MaterialCommunityIcons name="calendar-edit" size={16} color={COLORS.textTertiary} />
+                <Pressable style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }]} onPress={() => setShowDatePicker(true)}>
+                  <MaterialCommunityIcons name="calendar-edit" size={16} color={appColors.textTertiary} />
                 </Pressable>
               </View>
               {editDueDate && format(editDueDate, "yyyy-MM-dd") !== format(new Date(), "yyyy-MM-dd") && format(editDueDate, "yyyy-MM-dd") !== format(addDays(new Date(), 1), "yyyy-MM-dd") && (
-                <Text style={styles.selectedDueDateText}>Due: {format(editDueDate, "EEE, MMM d")}</Text>
+                <Text style={[styles.selectedDueDateText, { color: appColors.primary }]}>Due: {format(editDueDate, "EEE, MMM d")}</Text>
               )}
               {showDatePicker && (
                 <DateTimePicker
@@ -924,48 +1117,48 @@ export default function TaskDetailScreen() {
 
           {/* Scheduling Method - Edit mode */}
           {isEditing && (
-            <View style={styles.card}>
+            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
               <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="robot-outline" size={18} color={COLORS.textTertiary} />
-                <Text style={styles.cardLabel}>Scheduling Method</Text>
+                <MaterialCommunityIcons name="robot-outline" size={18} color={appColors.textSecondary} />
+                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Scheduling Method</Text>
               </View>
               <View style={styles.schedulingOptions}>
                 <Pressable
-                  style={[styles.schedulingOption, editSchedulingMethod === "SMART" && styles.schedulingOptionActive]}
+                  style={[styles.schedulingOption, { backgroundColor: appColors.inputBg }, editSchedulingMethod === "SMART" && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary }]}
                   onPress={() => setEditSchedulingMethod("SMART")}
                 >
                   <MaterialCommunityIcons
                     name="robot-outline"
                     size={20}
-                    color={editSchedulingMethod === "SMART" ? COLORS.gradientStart : COLORS.textTertiary}
+                    color={editSchedulingMethod === "SMART" ? appColors.primary : appColors.textTertiary}
                   />
                   <View style={styles.schedulingOptionContent}>
-                    <Text style={[styles.schedulingOptionTitle, editSchedulingMethod === "SMART" && styles.schedulingOptionTitleActive]}>
+                    <Text style={[styles.schedulingOptionTitle, { color: appColors.textPrimary }, editSchedulingMethod === "SMART" && { color: appColors.primary }]}>
                       AI Scheduling
                     </Text>
-                    <Text style={styles.schedulingOptionDesc}>Find best time automatically</Text>
+                    <Text style={[styles.schedulingOptionDesc, { color: appColors.textTertiary }]}>Find best time automatically</Text>
                   </View>
                   {editSchedulingMethod === "SMART" && (
-                    <MaterialCommunityIcons name="check-circle" size={20} color={COLORS.gradientStart} />
+                    <MaterialCommunityIcons name="check-circle" size={20} color={appColors.primary} />
                   )}
                 </Pressable>
                 <Pressable
-                  style={[styles.schedulingOption, editSchedulingMethod === "MANUAL" && styles.schedulingOptionActive]}
+                  style={[styles.schedulingOption, { backgroundColor: appColors.inputBg }, editSchedulingMethod === "MANUAL" && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary }]}
                   onPress={() => setEditSchedulingMethod("MANUAL")}
                 >
                   <MaterialCommunityIcons
                     name="calendar-cursor"
                     size={20}
-                    color={editSchedulingMethod === "MANUAL" ? COLORS.gradientStart : COLORS.textTertiary}
+                    color={editSchedulingMethod === "MANUAL" ? appColors.primary : appColors.textTertiary}
                   />
                   <View style={styles.schedulingOptionContent}>
-                    <Text style={[styles.schedulingOptionTitle, editSchedulingMethod === "MANUAL" && styles.schedulingOptionTitleActive]}>
+                    <Text style={[styles.schedulingOptionTitle, { color: appColors.textPrimary }, editSchedulingMethod === "MANUAL" && { color: appColors.primary }]}>
                       Manual
                     </Text>
-                    <Text style={styles.schedulingOptionDesc}>Choose your own time</Text>
+                    <Text style={[styles.schedulingOptionDesc, { color: appColors.textTertiary }]}>Choose your own time</Text>
                   </View>
                   {editSchedulingMethod === "MANUAL" && (
-                    <MaterialCommunityIcons name="check-circle" size={20} color={COLORS.gradientStart} />
+                    <MaterialCommunityIcons name="check-circle" size={20} color={appColors.primary} />
                   )}
                 </Pressable>
               </View>
@@ -973,10 +1166,10 @@ export default function TaskDetailScreen() {
           )}
 
           {/* Tags - Edit mode or display */}
-          <View style={styles.card}>
+          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
             <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="tag-multiple" size={18} color={COLORS.textTertiary} />
-              <Text style={styles.cardLabel}>Tags</Text>
+              <MaterialCommunityIcons name="tag-multiple" size={18} color={appColors.textSecondary} />
+              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Tags</Text>
             </View>
             {isEditing ? (
               <View style={styles.tagsEditSection}>
@@ -984,18 +1177,18 @@ export default function TaskDetailScreen() {
                 {editTags.length > 0 && (
                   <View style={styles.tagChipsRow}>
                     {editTags.map((tag) => (
-                      <View key={tag} style={styles.tagChip}>
-                        <Text style={styles.tagChipText}>{tag}</Text>
+                      <View key={tag} style={[styles.tagChip, { backgroundColor: appColors.secondaryLight }]}>
+                        <Text style={[styles.tagChipText, { color: appColors.secondary }]}>{tag}</Text>
                         <Pressable onPress={() => removeEditTag(tag)} hitSlop={8}>
-                          <MaterialCommunityIcons name="close" size={14} color={COLORS.aiPurple} />
+                          <MaterialCommunityIcons name="close" size={14} color={appColors.secondary} />
                         </Pressable>
                       </View>
                     ))}
                   </View>
                 )}
                 {/* Tag input */}
-                <View style={styles.tagInputRow}>
-                  <MaterialCommunityIcons name="tag-plus" size={18} color={editTagInput ? COLORS.gradientStart : COLORS.textTertiary} />
+                <View style={[styles.tagInputRow, { backgroundColor: appColors.inputBg }]}>
+                  <MaterialCommunityIcons name="tag-plus" size={18} color={editTagInput ? appColors.primary : appColors.textTertiary} />
                   <TextInput
                     placeholder={editTags.length > 0 ? "Add another tag..." : "Add tags..."}
                     value={editTagInput}
@@ -1003,15 +1196,18 @@ export default function TaskDetailScreen() {
                     onSubmitEditing={() => {
                       if (editTagInput.trim()) addEditTag(editTagInput);
                     }}
-                    style={styles.tagInput}
+                    style={[styles.tagInput, { color: appColors.textPrimary }]}
                     mode="flat"
                     underlineColor="transparent"
                     activeUnderlineColor="transparent"
-                    cursorColor={COLORS.gradientStart}
+                    cursorColor={appColors.primary}
+                    placeholderTextColor={appColors.textTertiary}
+                    textColor={appColors.textPrimary}
                     dense
+                    theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
                   />
                   {editTagInput.trim() && (
-                    <Pressable onPress={() => addEditTag(editTagInput)} style={styles.addTagBtn}>
+                    <Pressable onPress={() => addEditTag(editTagInput)} style={[styles.addTagBtn, { backgroundColor: appColors.primary }]}>
                       <MaterialCommunityIcons name="plus" size={16} color="#FFFFFF" />
                     </Pressable>
                   )}
@@ -1019,11 +1215,11 @@ export default function TaskDetailScreen() {
                 {/* Tag suggestions */}
                 {existingTags.filter(t => !editTags.includes(t)).length > 0 && (
                   <View style={styles.tagSuggestions}>
-                    <Text style={styles.tagSuggestionsLabel}>Quick add:</Text>
+                    <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Quick add:</Text>
                     <View style={styles.tagSuggestionsRow}>
                       {existingTags.filter(t => !editTags.includes(t) && (!editTagInput || t.includes(editTagInput.toLowerCase()))).slice(0, 5).map((tag) => (
-                        <Pressable key={tag} style={styles.tagSuggestion} onPress={() => addEditTag(tag)}>
-                          <Text style={styles.tagSuggestionText}>{tag}</Text>
+                        <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.inputBg, borderColor: appColors.border }]} onPress={() => addEditTag(tag)}>
+                          <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
                         </Pressable>
                       ))}
                     </View>
@@ -1033,80 +1229,79 @@ export default function TaskDetailScreen() {
             ) : task.tags && task.tags.length > 0 ? (
               <View style={styles.tagChipsRow}>
                 {task.tags.map((tag) => (
-                  <View key={tag} style={styles.tagChipDisplay}>
-                    <Text style={styles.tagChipDisplayText}>{tag}</Text>
+                  <View key={tag} style={[styles.tagChipDisplay, { backgroundColor: appColors.secondaryLight }]}>
+                    <Text style={[styles.tagChipDisplayText, { color: appColors.secondary }]}>{tag}</Text>
                   </View>
                 ))}
               </View>
             ) : (
-              <Text style={styles.emptyDescription}>No tags</Text>
+              <Text style={[styles.emptyDescription, { color: appColors.textTertiary }]}>No tags</Text>
             )}
           </View>
 
           {/* Description */}
-          <View style={styles.card}>
+          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
             <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="text" size={18} color={COLORS.textTertiary} />
-              <Text style={styles.cardLabel}>Notes</Text>
+              <MaterialCommunityIcons name="text" size={18} color={appColors.textSecondary} />
+              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Notes</Text>
             </View>
             {isEditing ? (
               <TextInput
                 value={editDescription}
                 onChangeText={setEditDescription}
-                style={styles.descriptionInput}
+                style={[styles.descriptionInput, { backgroundColor: appColors.surface }]}
                 mode="outlined"
                 multiline
                 numberOfLines={3}
                 placeholder="Add notes..."
-                outlineColor={COLORS.border}
-                activeOutlineColor={COLORS.gradientStart}
-                cursorColor={COLORS.gradientStart}
+                outlineColor={appColors.border}
+                activeOutlineColor={appColors.primary}
+                cursorColor={appColors.primary}
+                textColor={appColors.textPrimary}
+                placeholderTextColor={appColors.textTertiary}
                 contentStyle={{ paddingTop: 12 }}
+                theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
               />
             ) : task.description ? (
-              <Text style={styles.descriptionText}>{task.description}</Text>
+              <Text style={[styles.descriptionText, { color: appColors.textPrimary }]}>{task.description}</Text>
             ) : (
-              <Text style={styles.emptyDescription}>No notes added</Text>
+              <Text style={[styles.emptyDescription, { color: appColors.textTertiary }]}>No notes added</Text>
             )}
           </View>
 
           {/* Details (view mode only) */}
           {!isEditing && (
-            <View style={styles.card}>
+            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
               <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="information-outline" size={18} color={COLORS.textTertiary} />
-                <Text style={styles.cardLabel}>Details</Text>
+                <MaterialCommunityIcons name="information-outline" size={18} color={appColors.textSecondary} />
+                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Details</Text>
               </View>
               <View style={styles.detailsList}>
                 <View style={styles.detailItem}>
-                  <Text style={styles.detailLabel}>Scheduling</Text>
-                  <Text style={styles.detailValue}>
+                  <Text style={[styles.detailLabel, { color: appColors.textSecondary }]}>Scheduling</Text>
+                  <Text style={[styles.detailValue, { color: appColors.textPrimary }]}>
                     {task.scheduling_method === "SMART" ? "AI Optimized" : "Manual"}
                   </Text>
                 </View>
                 {task.due_date && (
                   <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Due Date</Text>
-                    <Text style={styles.detailValue}>{formatDate(task.due_date)}</Text>
+                    <Text style={[styles.detailLabel, { color: appColors.textSecondary }]}>Due Date</Text>
+                    <Text style={[styles.detailValue, { color: appColors.textPrimary }]}>{formatDate(task.due_date)}</Text>
                   </View>
                 )}
-                <View style={styles.detailItem}>
-                  <Text style={styles.detailLabel}>Auto-reschedule</Text>
-                  <Text style={styles.detailValue}>{task.auto_reschedule ? "Enabled" : "Disabled"}</Text>
-                </View>
               </View>
             </View>
           )}
 
         {/* Subtasks Section - only show for parent tasks and not in edit mode */}
         {!task.parent_task_id && !isEditing && (
-          <View style={styles.card}>
+          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
             <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="format-list-checks" size={18} color={COLORS.textTertiary} />
-              <Text style={styles.cardLabel}>Subtasks</Text>
+              <MaterialCommunityIcons name="format-list-checks" size={18} color={appColors.textSecondary} />
+              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Subtasks</Text>
               {subtasks.length > 0 && (
-                <View style={styles.subtaskBadge}>
-                  <Text style={styles.subtaskBadgeText}>{getSubtaskProgressText()}</Text>
+                <View style={[styles.subtaskBadge, { backgroundColor: appColors.chipBg }]}>
+                  <Text style={[styles.subtaskBadgeText, { color: appColors.textSecondary }]}>{getSubtaskProgressText()}</Text>
                 </View>
               )}
             </View>
@@ -1115,8 +1310,8 @@ export default function TaskDetailScreen() {
             {subtasks.length > 0 && (
               <ProgressBar
                 progress={getSubtaskProgress()}
-                color={COLORS.success}
-                style={styles.progressBar}
+                color={appColors.success}
+                style={[styles.progressBar, { backgroundColor: appColors.chipBg }]}
               />
             )}
 
@@ -1124,7 +1319,7 @@ export default function TaskDetailScreen() {
             {subtasks.map((subtask) => (
               <Pressable
                 key={subtask.id}
-                style={styles.subtaskItem}
+                style={[styles.subtaskItem, { borderBottomColor: appColors.border }]}
                 onPress={() => router.push(`/task/${subtask.id}`)}
               >
                 <Pressable
@@ -1134,18 +1329,19 @@ export default function TaskDetailScreen() {
                   <MaterialCommunityIcons
                     name={subtask.status === "completed" ? "checkbox-marked-circle" : "checkbox-blank-circle-outline"}
                     size={22}
-                    color={subtask.status === "completed" ? COLORS.success : COLORS.textTertiary}
+                    color={subtask.status === "completed" ? appColors.success : appColors.textTertiary}
                   />
                 </Pressable>
                 <Text
                   style={[
                     styles.subtaskTitle,
-                    subtask.status === "completed" && styles.subtaskCompleted,
+                    { color: appColors.textPrimary },
+                    subtask.status === "completed" && { textDecorationLine: "line-through", color: appColors.textTertiary },
                   ]}
                 >
                   {subtask.title}
                 </Text>
-                <MaterialCommunityIcons name="chevron-right" size={18} color={COLORS.textTertiary} />
+                <MaterialCommunityIcons name="chevron-right" size={18} color={appColors.textTertiary} />
               </Pressable>
             ))}
 
@@ -1157,22 +1353,25 @@ export default function TaskDetailScreen() {
                   placeholder="Subtask title"
                   value={newSubtaskTitle}
                   onChangeText={setNewSubtaskTitle}
-                  style={styles.addSubtaskInput}
-                  outlineColor={COLORS.border}
-                  activeOutlineColor={COLORS.gradientStart}
-                  cursorColor={COLORS.gradientStart}
+                  style={[styles.addSubtaskInput, { backgroundColor: appColors.surface }]}
+                  outlineColor={appColors.border}
+                  activeOutlineColor={appColors.primary}
+                  cursorColor={appColors.primary}
+                  textColor={appColors.textPrimary}
+                  placeholderTextColor={appColors.textTertiary}
                   dense
                   autoFocus
                   onSubmitEditing={handleAddSubtask}
+                  theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
                 />
                 <View style={styles.addSubtaskActions}>
                   <Pressable onPress={() => { setShowAddSubtask(false); setNewSubtaskTitle(""); }} style={styles.cancelSubtaskBtn}>
-                    <Text style={styles.cancelSubtaskText}>Cancel</Text>
+                    <Text style={[styles.cancelSubtaskText, { color: appColors.textSecondary }]}>Cancel</Text>
                   </Pressable>
                   <Pressable
                     onPress={handleAddSubtask}
                     disabled={!newSubtaskTitle.trim() || addingSubtask}
-                    style={[styles.addSubtaskBtn, (!newSubtaskTitle.trim() || addingSubtask) && styles.addSubtaskBtnDisabled]}
+                    style={[styles.addSubtaskBtn, { backgroundColor: appColors.primary }, (!newSubtaskTitle.trim() || addingSubtask) && styles.addSubtaskBtnDisabled]}
                   >
                     {addingSubtask ? (
                       <ActivityIndicator size="small" color="#FFFFFF" />
@@ -1184,13 +1383,13 @@ export default function TaskDetailScreen() {
               </View>
             ) : (
               <Pressable style={styles.addSubtaskRow} onPress={() => setShowAddSubtask(true)}>
-                <MaterialCommunityIcons name="plus" size={20} color={COLORS.gradientStart} />
-                <Text style={styles.addSubtaskText}>Add Subtask</Text>
+                <MaterialCommunityIcons name="plus" size={20} color={appColors.primary} />
+                <Text style={[styles.addSubtaskText, { color: appColors.primary }]}>Add Subtask</Text>
               </Pressable>
             )}
 
             {subtasks.length === 0 && !showAddSubtask && (
-              <Text style={styles.noSubtasks}>Break this task into smaller steps</Text>
+              <Text style={[styles.noSubtasks, { color: appColors.textTertiary }]}>Break this task into smaller steps</Text>
             )}
           </View>
         )}
@@ -1198,45 +1397,42 @@ export default function TaskDetailScreen() {
         {/* Danger Zone */}
         {!isEditing && (
           <Pressable style={styles.deleteButton} onPress={handleDelete}>
-            <MaterialCommunityIcons name="delete-outline" size={20} color={COLORS.error} />
-            <Text style={styles.deleteButtonText}>Delete Task</Text>
+            <MaterialCommunityIcons name="delete-outline" size={20} color={appColors.error} />
+            <Text style={[styles.deleteButtonText, { color: appColors.error }]}>Delete Task</Text>
           </Pressable>
         )}
 
-        {/* Spacer */}
-        <View style={{ height: isEditing ? 120 : 100 }} />
+        {/* Spacer for bottom action bar */}
+        <View style={{ height: isEditing ? 120 : 130 }} />
       </ScrollView>
 
       {/* Bottom Actions */}
       {isEditing ? (
-        <View style={styles.bottomAction}>
+        <View style={[styles.bottomAction, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
           <Pressable
-            style={[styles.saveButton, (!editTitle.trim() || saveLoading) && styles.saveButtonDisabled]}
+            style={[
+              styles.saveButton,
+              { backgroundColor: saveLoading ? "#D1D5DB" : appColors.primary },
+              (!editTitle.trim() || saveLoading) && styles.saveButtonDisabled,
+            ]}
             onPress={saveEdits}
             disabled={!editTitle.trim() || saveLoading}
           >
-            <LinearGradient
-              colors={!editTitle.trim() || saveLoading ? ["#D1D5DB", "#D1D5DB"] : [COLORS.gradientStart, COLORS.gradientEnd]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.saveButtonGradient}
-            >
-              {saveLoading ? (
-                <ActivityIndicator size="small" color="#FFFFFF" />
-              ) : (
-                <>
-                  <MaterialCommunityIcons name="check" size={22} color="#FFFFFF" />
-                  <Text style={styles.saveButtonText}>Save Changes</Text>
-                </>
-              )}
-            </LinearGradient>
+            {saveLoading ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <>
+                <MaterialCommunityIcons name="check" size={22} color="#FFFFFF" />
+                <Text style={styles.saveButtonText}>Save Changes</Text>
+              </>
+            )}
           </Pressable>
         </View>
       ) : task.status !== "completed" ? (
-        <View style={styles.bottomActions}>
-          <Pressable style={styles.rescheduleBtn} onPress={handleReschedule} disabled={actionLoading}>
-            <MaterialCommunityIcons name="calendar-clock" size={20} color={COLORS.gradientStart} />
-            <Text style={styles.rescheduleBtnText}>
+        <View style={[styles.bottomActions, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
+          <Pressable style={[styles.rescheduleBtn, { borderColor: appColors.primary, backgroundColor: appColors.surface }]} onPress={handleReschedule} disabled={actionLoading}>
+            <MaterialCommunityIcons name="calendar-clock" size={20} color={appColors.primary} />
+            <Text style={[styles.rescheduleBtnText, { color: appColors.primary }]}>
               {task.scheduled_start ? "Reschedule" : "Schedule"}
             </Text>
           </Pressable>
@@ -1246,7 +1442,7 @@ export default function TaskDetailScreen() {
             disabled={actionLoading}
           >
             <LinearGradient
-              colors={actionLoading ? ["#D1D5DB", "#D1D5DB"] : [COLORS.success, "#4DAF6E"]}
+              colors={actionLoading ? ["#D1D5DB", "#D1D5DB"] : [appColors.success, "#4DAF6E"]}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 0 }}
               style={styles.completeBtnGradient}
@@ -1263,9 +1459,9 @@ export default function TaskDetailScreen() {
           </Pressable>
         </View>
       ) : (
-        <View style={styles.completedBanner}>
-          <MaterialCommunityIcons name="check-circle" size={20} color={COLORS.success} />
-          <Text style={styles.completedBannerText}>Task completed</Text>
+        <View style={[styles.completedBanner, { backgroundColor: appColors.successLight, borderTopColor: appColors.successLight }]}>
+          <MaterialCommunityIcons name="check-circle" size={20} color={appColors.success} />
+          <Text style={[styles.completedBannerText, { color: appColors.success }]}>Task completed</Text>
         </View>
       )}
 
@@ -1280,8 +1476,35 @@ export default function TaskDetailScreen() {
         slots={rescheduleSlots}
         isLoading={rescheduleLoading}
         error={rescheduleError}
-        schedulingMethod={task.scheduling_method as "SMART" | "MANUAL"}
+        schedulingMethod={rescheduleMethod}
         busySlots={busySlots}
+        onMethodChosen={handleMethodChoice}
+      />
+
+      {/* Scheduling Feedback Modal (shown for AI-scheduled tasks) */}
+      {task && task.scheduled_start && task.scheduled_end && (
+        <SchedulingFeedbackModal
+          visible={showSchedulingFeedback}
+          onComplete={onSchedulingFeedbackComplete}
+          taskId={task.id}
+          taskTitle={task.title}
+          scheduledStart={task.scheduled_start}
+          scheduledEnd={task.scheduled_end}
+        />
+      )}
+
+      {/* Happiness Check Modal */}
+      <HappinessCheckModal
+        visible={showHappinessCheck}
+        onResponse={onHappinessResponse}
+        tasksCompleted={happinessTasksCompleted}
+      />
+
+      {/* Feedback Form Modal */}
+      <FeedbackFormModal
+        visible={showFeedbackForm}
+        onSubmit={onFeedbackSubmit}
+        onSkip={onFeedbackSkip}
       />
     </SafeAreaView>
   );
@@ -1310,7 +1533,7 @@ const styles = StyleSheet.create({
   goBackButton: {
     paddingHorizontal: 20,
     paddingVertical: 10,
-    backgroundColor: COLORS.gradientStart,
+    backgroundColor: COLORS.primary,
     borderRadius: 8,
   },
   goBackText: {
@@ -1451,7 +1674,7 @@ const styles = StyleSheet.create({
   scheduleTime: {
     fontSize: 22,
     fontWeight: "700",
-    color: COLORS.gradientStart,
+    color: COLORS.primary,
     letterSpacing: -0.3,
   },
   durationEditRow: {
@@ -1502,7 +1725,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   dueDateChipActive: {
-    backgroundColor: COLORS.gradientStart,
+    backgroundColor: COLORS.primary,
   },
   dueDateChipText: {
     fontSize: 13,
@@ -1515,7 +1738,7 @@ const styles = StyleSheet.create({
   selectedDueDateText: {
     marginTop: 10,
     fontSize: 13,
-    color: COLORS.gradientStart,
+    color: COLORS.primary,
     fontWeight: "500",
   },
   // Scheduling Method
@@ -1534,7 +1757,7 @@ const styles = StyleSheet.create({
   },
   schedulingOptionActive: {
     backgroundColor: "#F0F7FF",
-    borderColor: COLORS.gradientStart,
+    borderColor: COLORS.primary,
   },
   schedulingOptionContent: {
     flex: 1,
@@ -1546,7 +1769,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   schedulingOptionTitleActive: {
-    color: COLORS.gradientStart,
+    color: COLORS.primary,
   },
   schedulingOptionDesc: {
     fontSize: 12,
@@ -1604,7 +1827,7 @@ const styles = StyleSheet.create({
     width: 26,
     height: 26,
     borderRadius: 13,
-    backgroundColor: COLORS.gradientStart,
+    backgroundColor: COLORS.primary,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -1710,7 +1933,7 @@ const styles = StyleSheet.create({
   addSubtaskBtn: {
     paddingHorizontal: 20,
     paddingVertical: 10,
-    backgroundColor: COLORS.gradientStart,
+    backgroundColor: COLORS.primary,
     borderRadius: 8,
   },
   addSubtaskBtnDisabled: {
@@ -1730,7 +1953,7 @@ const styles = StyleSheet.create({
   addSubtaskText: {
     fontSize: 14,
     fontWeight: "500",
-    color: COLORS.gradientStart,
+    color: COLORS.primary,
   },
   noSubtasks: {
     fontSize: 13,
@@ -1761,23 +1984,20 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     paddingHorizontal: 20,
     paddingVertical: 16,
-    paddingBottom: 32,
+    paddingBottom: 44,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
   saveButton: {
-    borderRadius: 16,
-    overflow: "hidden",
-  },
-  saveButtonDisabled: {
-    opacity: 0.7,
-  },
-  saveButtonGradient: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
     paddingVertical: 16,
+    borderRadius: 16,
+  },
+  saveButtonDisabled: {
+    opacity: 0.7,
   },
   saveButtonText: {
     fontSize: 17,
@@ -1794,7 +2014,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     paddingHorizontal: 20,
     paddingVertical: 16,
-    paddingBottom: 32,
+    paddingBottom: 44,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
@@ -1807,13 +2027,13 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: COLORS.gradientStart,
+    borderColor: COLORS.primary,
     backgroundColor: "#FFFFFF",
   },
   rescheduleBtnText: {
     fontSize: 15,
     fontWeight: "600",
-    color: COLORS.gradientStart,
+    color: COLORS.primary,
   },
   completeBtn: {
     flex: 1,
@@ -1855,4 +2075,5 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: COLORS.success,
   },
+
 });
