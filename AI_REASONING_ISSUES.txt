@@ -1,0 +1,48 @@
+AI SLOT REASONING — KNOWN ISSUES (post-test 2026-03-01)
+========================================================
+
+1. GENERIC SLOT 3 REASON
+   - AI occasionally outputs "Morning/Afternoon option on [day]" for 3rd slot
+   - Post-processing filter (isGenericReason + buildContextualReason) added in code
+     but edge function not yet deployed — needs: npx supabase functions deploy rank-slots
+   - Severity: Medium — slot choice is correct, only the label is poor
+
+2. DEADLINE DAY LANGUAGE
+   - Slot on deadline day still says "full day before the deadline"
+   - Prompt ban covers "buffer" and "day before deadline" but AI uses slight variants
+   - Need stricter ban OR post-processing to detect deadline-day slots and override reason
+   - Severity: Medium — factually wrong framing shown to user
+
+3. TIMEZONE LABEL MISMATCH IN AI REASONING — FIXED
+   - Candidate list, existing tasks, day load map, and due date now all formatted
+     using user's local timezone via Intl.DateTimeFormat with body.timezone
+   - localHour() helper extracts correct local hour for time-of-day labels
+   - Deployed in rank-slots v10+
+
+4. GAP DETECTION — NOT A BUG (Task B test)
+   - 30min task due Tuesday — AI picked all Monday slots, not Tuesday 11am gap
+   - Root cause: applyDeadlineStyleFilter gives -35 to same-deadline-day slots for
+     early-starters (deadline_style < 30). Monday scores ~35pts higher than Tuesday.
+   - This is CORRECT behaviour — early starters should avoid the deadline day
+   - To verify gap detection works: retest Task B with neutral/deadline-driven personality
+   - Possible enhancement: add "natural gap bonus" (+10-15) when slot fits between
+     two scheduled tasks within 30min buffer — makes tight gaps more competitive
+
+5. PERSONALITY MEASURE IMPACT — NEEDS SYSTEMATIC TESTING
+   - Each personality dimension (chronotype, deadline_style, focus_duration, etc.)
+     affects Stage 1 scoring AND the AI's reason quality differently
+   - We've only tested one personality profile (early bird + early starter)
+   - Need to test: how does each dimension individually change slot selection and reasons?
+   - Specifically: does task_switching (single-tasker) create a "natural gap bonus"
+     that helps find tight gaps like Tue 11-11:30am?
+   - Recommended test matrix: vary one dimension at a time, same task + schedule
+   - Severity: Low (informational) — but important for ensuring AI reasons feel
+     accurate for all user types, not just one profile
+
+6. EDGE FUNCTION RETURNING NON-2XX (intermittent)
+   - rankSlotsWithAI fails with FunctionsHttpError, falls back to generic algorithmic reasons
+   - Generic fallback reasons are poor: "Best available slot matching your preferences"
+   - Likely cause A: weekly AI limit hit during testing (check Supabase dashboard)
+   - Likely cause B: syntax/runtime error in newly deployed edge function code
+   - Action: check Supabase dashboard → Edge Functions → rank-slots → Logs for actual error
+   - Severity: High — when AI fails, user sees useless reasons with no explanation
