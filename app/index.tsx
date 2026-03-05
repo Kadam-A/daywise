@@ -8,10 +8,12 @@ import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import { supabase, getCurrentSession } from "@/lib/supabase";
+import { useAppColors } from "@/contexts/ThemeContext";
 
 type AuthState = "loading" | "unauthenticated" | "needs_onboarding" | "authenticated";
 
 export default function Index() {
+  const appColors = useAppColors();
   const [authState, setAuthState] = useState<AuthState>("loading");
 
   useEffect(() => {
@@ -49,9 +51,13 @@ export default function Index() {
 
   const checkOnboardingStatus = async () => {
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setAuthState("unauthenticated"); return; }
+
       const { data: profile, error } = await supabase
         .from("user_profiles")
         .select("personality_data")
+        .eq("id", user.id)
         .single();
 
       if (error || !profile) {
@@ -78,8 +84,8 @@ export default function Index() {
 
   if (authState === "loading") {
     return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#ffffff" }}>
-        <ActivityIndicator size="large" color="#2563eb" />
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: appColors.background }}>
+        <ActivityIndicator size="large" color={appColors.primary} />
       </View>
     );
   }
