@@ -16,6 +16,7 @@ import {
   Modal,
   Pressable,
   ScrollView,
+  Platform,
 } from "react-native";
 import {
   Text,
@@ -25,8 +26,14 @@ import {
   ProgressBar,
   IconButton,
 } from "react-native-paper";
-import { TimeSlot, Task } from "../lib/types";
+import { TimeSlot, Task, SchedulingFactor } from "../lib/types";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import TimeSlotPicker from "./TimeSlotPicker";
+import { useAppColors } from "@/contexts/ThemeContext";
+import { useGuidedTour } from "@/contexts/GuidedTourContext";
+import TourTooltip from "@/components/TourTooltip";
+import { addDays, endOfDay, format } from "date-fns";
+import DateTimePicker from "@react-native-community/datetimepicker";
 
 interface SchedulingModalProps {
   visible: boolean;
@@ -36,8 +43,10 @@ interface SchedulingModalProps {
   slots: TimeSlot[];
   isLoading: boolean;
   error: string | null;
-  schedulingMethod: "SMART" | "MANUAL";
+  schedulingMethod: "SMART" | "MANUAL" | null;
   busySlots?: { start: string; end: string; title: string }[];
+  onMethodChosen?: (method: "SMART" | "MANUAL") => void;
+  preselectedDate?: Date;
 }
 
 export default function SchedulingModal({
@@ -50,9 +59,30 @@ export default function SchedulingModal({
   error,
   schedulingMethod,
   busySlots = [],
+  onMethodChosen,
+  preselectedDate,
 }: SchedulingModalProps) {
+  const appColors = useAppColors();
+  const { tourStep, advanceTour, skipTour } = useGuidedTour();
   const [showAlternatives, setShowAlternatives] = useState(false);
+  // Local dismissed flags so tooltip hides without advancing tour step
+  const [aiTooltipDismissed, setAiTooltipDismissed] = useState(false);
+  const [manualTooltipDismissed, setManualTooltipDismissed] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<TimeSlot | null>(null);
+
+  // Due date picker for tasks without one (shown before AI scheduling)
+  const [needsDueDate, setNeedsDueDate] = useState(false);
+  const [tempDueDate, setTempDueDate] = useState<Date>(endOfDay(addDays(new Date(), 1)));
+  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  // Reset dismissed flags whenever slots reload (new scheduling session)
+  React.useEffect(() => {
+    setAiTooltipDismissed(false);
+  }, [slots.length]);
+
+  React.useEffect(() => {
+    setManualTooltipDismissed(false);
+  }, [visible]);
 
   const topSlot = slots[0];
   const alternativeSlots = slots.slice(1);
@@ -94,22 +124,162 @@ export default function SchedulingModal({
       onRequestClose={onClose}
     >
       <View style={styles.overlay}>
-        <Surface style={styles.modal} elevation={5}>
+        <Surface style={[styles.modal, { backgroundColor: appColors.surface }]} elevation={5}>
           {/* Header */}
-          <View style={styles.header}>
-            <Text variant="titleLarge" style={styles.title}>
-              {schedulingMethod === "SMART"
+          <View style={[styles.header, { borderBottomColor: appColors.border }]}>
+            <Text variant="titleLarge" style={[styles.title, { color: appColors.textPrimary }]}>
+              {schedulingMethod === null
+                ? "Schedule Task"
+                : schedulingMethod === "SMART"
                 ? "I Found Your Best Time"
                 : "Select a Time"}
             </Text>
-            <IconButton icon="close" size={24} onPress={onClose} />
+            <IconButton icon="close" size={24} onPress={onClose} iconColor={appColors.textSecondary} />
           </View>
+
+          {/* Due Date Picker (shown for overdue / no due date tasks before AI scheduling) */}
+          {needsDueDate && !isLoading && (
+            <View style={styles.dueDateContainer}>
+              {/* Icon + title */}
+              <View style={[styles.dueDateIconCircle, { backgroundColor: `${appColors.primary}15` }]}>
+                <MaterialCommunityIcons name="calendar-clock" size={32} color={appColors.primary} />
+              </View>
+              <Text style={[styles.dueDateTitle, { color: appColors.textPrimary }]}>
+                Set a new deadline
+              </Text>
+              <Text style={[styles.dueDateSubtitle, { color: appColors.textSecondary }]}>
+                AI needs a deadline to find the best time
+              </Text>
+
+              {/* Selected date display */}
+              <Pressable
+                style={[styles.dueDateDisplay, { backgroundColor: appColors.inputBg, borderColor: appColors.border }]}
+                onPress={() => setShowDatePicker(true)}
+              >
+                <MaterialCommunityIcons name="calendar" size={20} color={appColors.primary} />
+                <Text style={[styles.dueDateDisplayText, { color: appColors.textPrimary }]}>
+                  {format(tempDueDate, "EEEE, MMM d")}
+                </Text>
+                <MaterialCommunityIcons name="pencil-outline" size={16} color={appColors.textTertiary} />
+              </Pressable>
+
+              {showDatePicker && (
+                <DateTimePicker
+                  value={tempDueDate}
+                  mode="date"
+                  minimumDate={new Date()}
+                  onChange={(_event: any, date?: Date) => {
+                    setShowDatePicker(Platform.OS === "ios");
+                    if (date) setTempDueDate(endOfDay(date));
+                  }}
+                />
+              )}
+
+              {/* Quick options */}
+              <View style={styles.dueDateQuickRow}>
+                {[
+                  { label: "Today", date: endOfDay(new Date()), icon: "weather-sunny" as const },
+                  { label: "Tomorrow", date: endOfDay(addDays(new Date(), 1)), icon: "weather-partly-cloudy" as const },
+                  { label: "In 3 days", date: endOfDay(addDays(new Date(), 3)), icon: "calendar-range" as const },
+                  { label: "This week", date: endOfDay(addDays(new Date(), 7)), icon: "calendar-week" as const },
+                ].map((opt) => {
+                  const isSelected = format(tempDueDate, "yyyy-MM-dd") === format(opt.date, "yyyy-MM-dd");
+                  return (
+                    <Pressable
+                      key={opt.label}
+                      style={[
+                        styles.dueDateOption,
+                        { borderColor: appColors.border },
+                        isSelected && { borderColor: appColors.primary, backgroundColor: `${appColors.primary}10` },
+                      ]}
+                      onPress={() => setTempDueDate(opt.date)}
+                    >
+                      <MaterialCommunityIcons
+                        name={opt.icon}
+                        size={18}
+                        color={isSelected ? appColors.primary : appColors.textTertiary}
+                      />
+                      <Text style={[
+                        styles.dueDateOptionText,
+                        { color: appColors.textSecondary },
+                        isSelected && { color: appColors.primary, fontWeight: "700" },
+                      ]}>{opt.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {/* CTA */}
+              <Pressable
+                style={[styles.dueDateConfirmBtn, { backgroundColor: appColors.primary }]}
+                onPress={() => {
+                  setNeedsDueDate(false);
+                  if (task) {
+                    task.due_date = tempDueDate.toISOString();
+                  }
+                  onMethodChosen?.("SMART");
+                }}
+              >
+                <MaterialCommunityIcons name="brain" size={20} color="#FFFFFF" />
+                <Text style={styles.dueDateConfirmText}>Find Best Time</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {/* Method Choice UI */}
+          {schedulingMethod === null && !needsDueDate && !isLoading && (
+            <View style={styles.methodChoiceContainer}>
+              <Text style={[styles.methodChoiceSubtitle, { color: appColors.textSecondary }]}>
+                How would you like to schedule?
+              </Text>
+
+              <Pressable
+                style={[styles.methodCard, { backgroundColor: `${appColors.primary}10` }]}
+                onPress={() => {
+                  // Overdue or no due date — always ask for a new deadline
+                  if (task && (!task.due_date || new Date(task.due_date) < new Date())) {
+                    setTempDueDate(endOfDay(addDays(new Date(), 1)));
+                    setNeedsDueDate(true);
+                    return;
+                  }
+                  onMethodChosen?.("SMART");
+                }}
+              >
+                <View style={[styles.methodCardIcon, { backgroundColor: `${appColors.primary}20` }]}>
+                  <MaterialCommunityIcons name="brain" size={28} color={appColors.primary} />
+                </View>
+                <View style={styles.methodCardContent}>
+                  <Text style={[styles.methodCardTitle, { color: appColors.textPrimary }]}>AI Smart Schedule</Text>
+                  <Text style={[styles.methodCardDesc, { color: appColors.textSecondary }]}>
+                    Find the best time based on your habits and calendar
+                  </Text>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={24} color={appColors.textTertiary} />
+              </Pressable>
+
+              <Pressable
+                style={[styles.methodCard, { backgroundColor: appColors.inputBg }]}
+                onPress={() => onMethodChosen?.("MANUAL")}
+              >
+                <View style={[styles.methodCardIcon, { backgroundColor: appColors.chipBg }]}>
+                  <MaterialCommunityIcons name="calendar-cursor" size={28} color={appColors.textSecondary} />
+                </View>
+                <View style={styles.methodCardContent}>
+                  <Text style={[styles.methodCardTitle, { color: appColors.textPrimary }]}>Pick a Time</Text>
+                  <Text style={[styles.methodCardDesc, { color: appColors.textSecondary }]}>
+                    Choose a specific date and time yourself
+                  </Text>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={24} color={appColors.textTertiary} />
+              </Pressable>
+            </View>
+          )}
 
           {/* Loading State */}
           {isLoading && (
             <View style={[styles.content, styles.loadingContainer]}>
-              <ActivityIndicator size="large" />
-              <Text style={styles.loadingText}>
+              <ActivityIndicator size="large" color={appColors.primary} />
+              <Text style={[styles.loadingText, { color: appColors.textSecondary }]}>
                 {schedulingMethod === "SMART"
                   ? "Finding your perfect time..."
                   : "Loading available times..."}
@@ -120,7 +290,7 @@ export default function SchedulingModal({
           {/* Error State */}
           {error && !isLoading && (
             <View style={[styles.content, styles.errorContainer]}>
-              <Text style={styles.errorText}>{error}</Text>
+              <Text style={[styles.errorText, { color: appColors.error }]}>{error}</Text>
               <Button mode="outlined" onPress={onClose} style={styles.errorButton}>
                 Try Again
               </Button>
@@ -134,6 +304,7 @@ export default function SchedulingModal({
                 task={task}
                 busySlots={busySlots}
                 onSelectSlot={onSelectSlot}
+                preselectedDate={preselectedDate}
               />
             </View>
           )}
@@ -149,8 +320,8 @@ export default function SchedulingModal({
                 {/* Top Recommendation */}
                 {!showAlternatives && (
                   <View style={styles.topRecommendation}>
-                    <Text style={styles.dateText}>{formatDate(topSlot.start)}</Text>
-                    <Text style={styles.timeText}>
+                    <Text style={[styles.dateText, { color: appColors.textSecondary }]}>{formatDate(topSlot.start)}</Text>
+                    <Text style={[styles.timeText, { color: appColors.textPrimary }]}>
                       {formatTimeRange(topSlot.start, topSlot.end)}
                     </Text>
 
@@ -158,14 +329,39 @@ export default function SchedulingModal({
                     <View style={styles.scoreContainer}>
                       <ProgressBar
                         progress={topSlot.score / 100}
-                        color="#4CAF50"
+                        color={appColors.success}
                         style={styles.scoreBar}
                       />
-                      <Text style={styles.scoreText}>{topSlot.score}% match</Text>
+                      <Text style={[styles.scoreText, { color: appColors.success }]}>{topSlot.score}% match</Text>
                     </View>
 
                     {/* AI Reason */}
-                    <Text style={styles.reasonText}>"{topSlot.reason}"</Text>
+                    {topSlot.reason && (
+                      <Text style={[styles.reasonText, { color: appColors.textSecondary }]}>"{topSlot.reason}"</Text>
+                    )}
+
+                    {/* Scheduling Factors - Why this time? */}
+                    {topSlot.factors && topSlot.factors.length > 0 && (
+                      <View style={[styles.factorsContainer, { backgroundColor: appColors.inputBg }]}>
+                        <Text style={[styles.factorsTitle, { color: appColors.textPrimary }]}>Why this time works for you:</Text>
+                        {topSlot.factors.map((factor, idx) => (
+                          <View key={idx} style={styles.factorRow}>
+                            <MaterialCommunityIcons
+                              name={(factor.icon as any) || (factor.impact > 0 ? "check-circle" : "alert-circle")}
+                              size={18}
+                              color={factor.impact > 0 ? appColors.success : appColors.warning}
+                              style={styles.factorIcon}
+                            />
+                            <Text style={[
+                              styles.factorText,
+                              { color: factor.impact > 0 ? appColors.success : appColors.warning }
+                            ]}>
+                              {factor.description}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
 
                     {/* Action Buttons */}
                     <View style={styles.buttonRow}>
@@ -174,6 +370,7 @@ export default function SchedulingModal({
                         onPress={handleConfirm}
                         style={styles.confirmButton}
                         icon="check"
+                        buttonColor={appColors.primary}
                       >
                         Perfect!
                       </Button>
@@ -182,6 +379,7 @@ export default function SchedulingModal({
                           mode="outlined"
                           onPress={() => setShowAlternatives(true)}
                           style={styles.alternativeButton}
+                          textColor={appColors.primary}
                         >
                           Show other times
                         </Button>
@@ -198,6 +396,7 @@ export default function SchedulingModal({
                       onPress={() => setShowAlternatives(false)}
                       icon="arrow-left"
                       style={styles.backButton}
+                      textColor={appColors.primary}
                     >
                       Back to top pick
                     </Button>
@@ -208,30 +407,45 @@ export default function SchedulingModal({
                         onPress={() => setSelectedSlot(slot)}
                         style={[
                           styles.slotCard,
-                          selectedSlot === slot && styles.slotCardSelected,
-                          index === 0 && styles.topSlotCard,
+                          { backgroundColor: appColors.inputBg, borderColor: "transparent" },
+                          selectedSlot === slot && { borderColor: appColors.primary, backgroundColor: appColors.primaryLight },
+                          index === 0 && { borderColor: appColors.success, backgroundColor: appColors.successLight },
                         ]}
                       >
                         <View style={styles.slotHeader}>
-                          <Text style={styles.slotDate}>{formatDate(slot.start)}</Text>
+                          <Text style={[styles.slotDate, { color: appColors.textSecondary }]}>{formatDate(slot.start)}</Text>
                           {index === 0 && (
-                            <View style={styles.topBadge}>
-                              <Text style={styles.topBadgeText}>Top Pick</Text>
+                            <View style={[styles.topBadge, { backgroundColor: appColors.success }]}>
+                              <Text style={[styles.topBadgeText, { color: appColors.surface }]}>Top Pick</Text>
                             </View>
                           )}
                         </View>
-                        <Text style={styles.slotTime}>
+                        <Text style={[styles.slotTime, { color: appColors.textPrimary }]}>
                           {formatTimeRange(slot.start, slot.end)}
                         </Text>
                         <View style={styles.slotScoreRow}>
                           <ProgressBar
                             progress={slot.score / 100}
-                            color={index === 0 ? "#4CAF50" : "#2196F3"}
+                            color={index === 0 ? appColors.success : appColors.primary}
                             style={styles.slotScoreBar}
                           />
-                          <Text style={styles.slotScore}>{slot.score}%</Text>
+                          <Text style={[styles.slotScore, { color: appColors.textSecondary }]}>{slot.score}%</Text>
                         </View>
-                        <Text style={styles.slotReason}>{slot.reason}</Text>
+                        {slot.reason && <Text style={[styles.slotReason, { color: appColors.textSecondary }]}>{slot.reason}</Text>}
+                        {slot.factors && slot.factors.length > 0 && (
+                          <View style={[styles.slotFactors, { borderTopColor: appColors.border }]}>
+                            {slot.factors.slice(0, 2).map((factor, fidx) => (
+                              <View key={fidx} style={styles.slotFactorRow}>
+                                <MaterialCommunityIcons
+                                  name={(factor.icon as any) || "circle-small"}
+                                  size={14}
+                                  color={factor.impact > 0 ? appColors.success : appColors.warning}
+                                />
+                                <Text style={[styles.slotFactorText, { color: appColors.textSecondary }]}>{factor.description}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        )}
                       </Pressable>
                     ))}
 
@@ -240,6 +454,7 @@ export default function SchedulingModal({
                       onPress={handleConfirm}
                       disabled={!selectedSlot}
                       style={styles.selectButton}
+                      buttonColor={appColors.primary}
                     >
                       {selectedSlot
                         ? `Schedule at ${formatTime(selectedSlot.start)}`
@@ -250,11 +465,11 @@ export default function SchedulingModal({
                 </>
               ) : (
                 <View style={styles.emptyContainer}>
-                  <Text style={styles.emptyTitle}>No available times found</Text>
-                  <Text style={styles.emptyText}>
+                  <Text style={[styles.emptyTitle, { color: appColors.textPrimary }]}>No available times found</Text>
+                  <Text style={[styles.emptyText, { color: appColors.textSecondary }]}>
                     Try extending your deadline or adjusting your work hours in settings.
                   </Text>
-                  <Button mode="outlined" onPress={onClose}>
+                  <Button mode="outlined" onPress={onClose} textColor={appColors.primary}>
                     Close
                   </Button>
                 </View>
@@ -263,6 +478,34 @@ export default function SchedulingModal({
           )}
         </Surface>
       </View>
+
+      {/* Tour tooltip: AI slots loaded */}
+      <TourTooltip
+        visible={tourStep === "tour_scheduling_ai" && schedulingMethod === "SMART" && !isLoading && slots.length > 0 && !aiTooltipDismissed}
+        icon="star-outline"
+        iconColor={appColors.primary}
+        title="Your best time slots"
+        body="I ranked these by your focus patterns and deadline. The top slot is your energy peak. Don't like it? Tap 'Show other times' to see all options."
+        ctaLabel="Got it — I'll pick one"
+        onCta={() => setAiTooltipDismissed(true)}
+        onSkip={skipTour}
+        showSkip
+        showUpArrow
+      />
+
+      {/* Tour tooltip: manual method choice */}
+      <TourTooltip
+        visible={tourStep === "tour_manual_schedule" && schedulingMethod === null && !isLoading && !needsDueDate && !manualTooltipDismissed}
+        icon="clock-edit-outline"
+        iconColor={appColors.secondary}
+        title="Pick your own time"
+        body="Tap 'Pick a Time' above to choose any free slot yourself. You're in full control."
+        ctaLabel="Got it"
+        onCta={() => setManualTooltipDismissed(true)}
+        onSkip={skipTour}
+        showSkip
+        showUpArrow
+      />
     </Modal>
   );
 }
@@ -274,7 +517,6 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   modal: {
-    backgroundColor: "#fff",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     height: "75%",
@@ -285,9 +527,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 20,
     paddingTop: 16,
-    paddingBottom: 8,
+    paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#f0f0f0",
   },
   title: {
     fontWeight: "600",
@@ -306,14 +547,12 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     marginTop: 16,
-    color: "#666",
   },
   errorContainer: {
     alignItems: "center",
     paddingVertical: 40,
   },
   errorText: {
-    color: "#f44336",
     textAlign: "center",
     marginBottom: 16,
   },
@@ -326,13 +565,11 @@ const styles = StyleSheet.create({
   },
   dateText: {
     fontSize: 18,
-    color: "#333",
     marginBottom: 4,
   },
   timeText: {
     fontSize: 28,
     fontWeight: "bold",
-    color: "#1a1a1a",
     marginBottom: 16,
   },
   scoreContainer: {
@@ -346,47 +583,61 @@ const styles = StyleSheet.create({
   },
   scoreText: {
     textAlign: "right",
-    color: "#4CAF50",
     fontWeight: "600",
   },
   reasonText: {
     fontSize: 16,
-    color: "#666",
     fontStyle: "italic",
     textAlign: "center",
-    marginBottom: 24,
+    marginBottom: 16,
     paddingHorizontal: 20,
+  },
+  factorsContainer: {
+    width: "100%",
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 24,
+  },
+  factorsTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+    marginBottom: 12,
+  },
+  factorRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 8,
+  },
+  factorIcon: {
+    marginRight: 10,
+    marginTop: 1,
+  },
+  factorText: {
+    fontSize: 14,
+    flex: 1,
+    lineHeight: 20,
   },
   buttonRow: {
     width: "100%",
     gap: 12,
+    marginBottom: 24,
   },
   confirmButton: {
     marginBottom: 8,
   },
   alternativeButton: {},
   alternativesContainer: {
-    paddingBottom: 20,
+    paddingBottom: 40,
   },
   backButton: {
     alignSelf: "flex-start",
     marginBottom: 12,
   },
   slotCard: {
-    backgroundColor: "#f8f8f8",
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 16,
     marginBottom: 12,
     borderWidth: 2,
-    borderColor: "transparent",
-  },
-  slotCardSelected: {
-    borderColor: "#2196F3",
-    backgroundColor: "#E3F2FD",
-  },
-  topSlotCard: {
-    borderColor: "#4CAF50",
-    backgroundColor: "#E8F5E9",
   },
   slotHeader: {
     flexDirection: "row",
@@ -396,16 +647,13 @@ const styles = StyleSheet.create({
   },
   slotDate: {
     fontSize: 14,
-    color: "#666",
   },
   topBadge: {
-    backgroundColor: "#4CAF50",
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 10,
   },
   topBadgeText: {
-    color: "#fff",
     fontSize: 12,
     fontWeight: "600",
   },
@@ -428,13 +676,26 @@ const styles = StyleSheet.create({
   slotScore: {
     fontSize: 14,
     fontWeight: "600",
-    color: "#666",
     width: 40,
   },
   slotReason: {
     fontSize: 14,
-    color: "#666",
     fontStyle: "italic",
+  },
+  slotFactors: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+  },
+  slotFactorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  slotFactorText: {
+    fontSize: 12,
+    marginLeft: 4,
+    flex: 1,
   },
   selectButton: {
     marginTop: 8,
@@ -449,8 +710,119 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   emptyText: {
-    color: "#666",
     textAlign: "center",
     marginBottom: 20,
+  },
+  // Method choice styles
+  methodChoiceContainer: {
+    padding: 24,
+    gap: 16,
+  },
+  methodChoiceSubtitle: {
+    fontSize: 15,
+    textAlign: "center",
+    marginBottom: 4,
+  },
+  methodCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 18,
+    borderRadius: 16,
+    gap: 14,
+  },
+  methodCardIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  methodCardContent: {
+    flex: 1,
+  },
+  methodCardTitle: {
+    fontSize: 17,
+    fontWeight: "600",
+    marginBottom: 3,
+  },
+  methodCardDesc: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  // Due date picker styles
+  dueDateContainer: {
+    flex: 1,
+    alignItems: "center",
+    paddingHorizontal: 24,
+    paddingTop: 32,
+  },
+  dueDateIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  dueDateTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    letterSpacing: -0.3,
+    marginBottom: 4,
+  },
+  dueDateSubtitle: {
+    fontSize: 14,
+    marginBottom: 24,
+  },
+  dueDateDisplay: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    width: "100%",
+    marginBottom: 20,
+  },
+  dueDateDisplayText: {
+    fontSize: 17,
+    fontWeight: "600",
+    flex: 1,
+  },
+  dueDateQuickRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 10,
+    marginBottom: 28,
+    width: "100%",
+  },
+  dueDateOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1.5,
+  },
+  dueDateOptionText: {
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  dueDateConfirmBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 16,
+    borderRadius: 16,
+    width: "100%",
+  },
+  dueDateConfirmText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "700",
   },
 });

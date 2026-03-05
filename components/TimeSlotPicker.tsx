@@ -1,7 +1,7 @@
 /**
  * TimeSlotPicker - Manual time slot selection
  *
- * Shows a week view with available/busy time slots.
+ * Shows a full 24-hour day (12AM–11PM) with available/busy time slots.
  * User can pick any available slot for their task.
  */
 
@@ -11,13 +11,21 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  Platform,
   ScrollView as ScrollViewType,
 } from "react-native";
 import { Text, Button } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
+import { addMonths, subMonths, format, startOfMonth, isBefore, startOfDay } from "date-fns";
 import { Task, TimeSlot } from "../lib/types";
+import { useAppColors } from "@/contexts/ThemeContext";
+import CalendarMonthView from "@/components/CalendarMonthView";
+import {
+  formatHour,
+  formatTimeRange,
+  generateHourSlots,
+  HourSlot,
+} from "@/lib/timeslot-utils";
 
 interface BusySlot {
   start: string;
@@ -29,6 +37,7 @@ interface TimeSlotPickerProps {
   task: Task | null;
   busySlots: BusySlot[];
   onSelectSlot: (slot: TimeSlot) => void;
+  preselectedDate?: Date;
 }
 
 interface DayOption {
@@ -37,31 +46,23 @@ interface DayOption {
   shortLabel: string;
 }
 
-interface HourSlot {
-  hour: number;
-  label: string;
-  status: "available" | "busy" | "partial";
-  busyReason?: string;
-}
-
-// Helper function - defined outside component to avoid hoisting issues
-const formatHour = (hour: number): string => {
-  const period = hour >= 12 ? "PM" : "AM";
-  const displayHour = hour > 12 ? hour - 12 : hour === 0 ? 12 : hour;
-  return `${displayHour}:00 ${period}`;
-};
-
-const SLOT_HEIGHT = 58; // paddingVertical(14*2) + marginBottom(8) + content height
+const SLOT_HEIGHT = 58;
 
 export default function TimeSlotPicker({
   task,
   busySlots,
   onSelectSlot,
+  preselectedDate,
 }: TimeSlotPickerProps) {
-  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const appColors = useAppColors();
+  const [selectedDate, setSelectedDate] = useState<Date>(preselectedDate ?? new Date());
   const [selectedHour, setSelectedHour] = useState<number | null>(null);
+  const [selectedMinute, setSelectedMinute] = useState<number>(0);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showMonthView, setShowMonthView] = useState(false);
+  const [monthViewDate, setMonthViewDate] = useState<Date>(startOfMonth(new Date()));
   const timeScrollRef = useRef<ScrollViewType>(null);
+  const dateScrollRef = useRef<ScrollViewType>(null);
 
   // Generate next 7 days
   const dayOptions: DayOption[] = useMemo(() => {
@@ -90,51 +91,24 @@ export default function TimeSlotPicker({
     return days;
   }, []);
 
-  // Generate hour slots for selected day (5 AM - 11 PM)
-  // Wide range so users can pick any time - algorithm handles preferences
+  // Generate hour slots for selected day — full 24 hours (12AM through 11PM)
   const hourSlots: HourSlot[] = useMemo(() => {
-    const slots: HourSlot[] = [];
     const taskDuration = task?.duration_minutes || 60;
-
-    for (let hour = 5; hour <= 23; hour++) {
-      const slotStart = new Date(selectedDate);
-      slotStart.setHours(hour, 0, 0, 0);
-
-      const slotEnd = new Date(slotStart);
-      slotEnd.setMinutes(slotEnd.getMinutes() + taskDuration);
-
-      // Check if slot overlaps with any busy slot
-      const overlappingBusy = busySlots.find((busy) => {
-        const busyStart = new Date(busy.start);
-        const busyEnd = new Date(busy.end);
-        return slotStart < busyEnd && slotEnd > busyStart;
-      });
-
-      // Check if slot is in the past
-      const now = new Date();
-      const isPast = slotStart < now;
-
-      let status: "available" | "busy" | "partial" = "available";
-      let busyReason: string | undefined;
-
-      if (isPast) {
-        status = "busy";
-        busyReason = "Past";
-      } else if (overlappingBusy) {
-        status = "busy";
-        busyReason = overlappingBusy.title;
-      }
-
-      slots.push({
-        hour,
-        label: formatHour(hour),
-        status,
-        busyReason,
-      });
-    }
-
-    return slots;
+    return generateHourSlots(selectedDate, busySlots, taskDuration);
   }, [selectedDate, busySlots, task?.duration_minutes]);
+
+  // Auto-scroll date carousel to selected date
+  useEffect(() => {
+    const idx = dayOptions.findIndex(
+      (d) => d.date.toDateString() === selectedDate.toDateString()
+    );
+    if (idx > 0 && dateScrollRef.current) {
+      const CHIP_WIDTH = 76; // minWidth 60 + padding
+      const GAP = 8;
+      const x = Math.max(0, idx * (CHIP_WIDTH + GAP) - CHIP_WIDTH);
+      setTimeout(() => dateScrollRef.current?.scrollTo({ x, animated: true }), 100);
+    }
+  }, []);
 
   // Auto-scroll to first available slot
   useEffect(() => {
@@ -143,7 +117,6 @@ export default function TimeSlotPicker({
     );
 
     if (firstAvailableIndex > 0 && timeScrollRef.current) {
-      // Small delay to ensure layout is complete
       setTimeout(() => {
         timeScrollRef.current?.scrollTo({
           y: firstAvailableIndex * SLOT_HEIGHT,
@@ -157,32 +130,32 @@ export default function TimeSlotPicker({
     if (selectedHour === null || !task) return;
 
     const start = new Date(selectedDate);
-    start.setHours(selectedHour, 0, 0, 0);
+    start.setHours(selectedHour, selectedMinute, 0, 0);
 
-    const end = new Date(start);
-    end.setMinutes(end.getMinutes() + task.duration_minutes);
+    // If the selected time is in the past (e.g. picked 10:00 at 10:30), clamp to now
+    const now = new Date();
+    if (start < now) {
+      start.setTime(now.getTime());
+    }
+
+    const end = new Date(start.getTime() + task.duration_minutes * 60_000);
 
     const slot: TimeSlot = {
       start: start.toISOString(),
       end: end.toISOString(),
-      score: 70, // Default score for manual selection
+      score: 70,
       reason: "Manually selected time",
     };
 
     onSelectSlot(slot);
   };
 
-  const formatSelectedTime = (): string => {
-    if (selectedHour === null) return "";
-    const endHour = selectedHour + Math.ceil((task?.duration_minutes || 60) / 60);
-    return `${formatHour(selectedHour)} - ${formatHour(endHour)}`;
-  };
-
   const handleDatePickerChange = (event: any, date?: Date) => {
-    setShowDatePicker(Platform.OS === "ios");
+    setShowDatePicker(false);
     if (date) {
       setSelectedDate(date);
       setSelectedHour(null);
+      setSelectedMinute(0);
     }
   };
 
@@ -191,98 +164,143 @@ export default function TimeSlotPicker({
     (day) => day.date.toDateString() === selectedDate.toDateString()
   );
 
-  const formatCustomDate = (date: Date): string => {
-    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  };
+  const formatCustomDate = (date: Date): string =>
+    date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  const buttonLabel =
+    selectedHour !== null && task
+      ? `Schedule at ${formatTimeRange(selectedHour, selectedDate, task.duration_minutes, selectedMinute)}`
+      : "Select a time slot";
 
   return (
     <View style={styles.container}>
       {/* Date Selection */}
-      <Text style={styles.sectionTitle}>Select Date</Text>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.dateScroll}
-        contentContainerStyle={styles.dateScrollContent}
-      >
-        {dayOptions.map((day, index) => {
-          const isSelected =
-            selectedDate.toDateString() === day.date.toDateString();
-          return (
-            <Pressable
-              key={index}
-              onPress={() => {
-                setSelectedDate(day.date);
-                setSelectedHour(null);
-              }}
-              style={[styles.dateChip, isSelected && styles.dateChipSelected]}
-            >
-              <Text
-                style={[
-                  styles.dateChipDay,
-                  isSelected && styles.dateChipTextSelected,
-                ]}
-              >
-                {day.shortLabel}
-              </Text>
-              <Text
-                style={[
-                  styles.dateChipDate,
-                  isSelected && styles.dateChipTextSelected,
-                ]}
-              >
-                {day.date.getDate()}
-              </Text>
-            </Pressable>
-          );
-        })}
-
-        {/* Custom date chip (shows when a date outside quick options is selected) */}
-        {isCustomDate && (
-          <Pressable
-            onPress={() => setShowDatePicker(true)}
-            style={[styles.dateChip, styles.dateChipSelected]}
-          >
-            <Text style={[styles.dateChipDay, styles.dateChipTextSelected]}>
-              {selectedDate.toLocaleDateString("en-US", { weekday: "short" })}
-            </Text>
-            <Text style={[styles.dateChipDate, styles.dateChipTextSelected]}>
-              {formatCustomDate(selectedDate)}
-            </Text>
-          </Pressable>
-        )}
-
-        {/* More dates button */}
+      <View style={styles.dateSectionHeader}>
+        <Text style={[styles.sectionTitle, { color: appColors.textPrimary }]}>Select Date</Text>
         <Pressable
-          onPress={() => setShowDatePicker(true)}
-          style={[styles.dateChip, styles.moreChip]}
+          onPress={() => setShowMonthView((v) => !v)}
+          style={[styles.monthViewToggle, { backgroundColor: showMonthView ? appColors.primaryLight : appColors.chipBg }]}
         >
-          <MaterialCommunityIcons name="calendar" size={20} color="#666" />
-          <Text style={styles.moreChipText}>More</Text>
+          <MaterialCommunityIcons
+            name={showMonthView ? "view-list" : "calendar-month-outline"}
+            size={16}
+            color={showMonthView ? appColors.primary : appColors.textTertiary}
+          />
         </Pressable>
-      </ScrollView>
+      </View>
 
-      {/* Date Picker Modal */}
-      {showDatePicker && (
-        <DateTimePicker
-          value={selectedDate}
-          mode="date"
-          minimumDate={new Date()}
-          onChange={handleDatePickerChange}
-        />
+      {showMonthView ? (
+        <ScrollView style={styles.monthViewContainer} showsVerticalScrollIndicator={false}>
+          {/* Month navigation */}
+          <View style={styles.monthNav}>
+            <Pressable
+              onPress={() => setMonthViewDate((d) => subMonths(d, 1))}
+              disabled={isBefore(subMonths(monthViewDate, 1), startOfMonth(new Date()))}
+              style={({ pressed }) => [styles.monthNavBtn, pressed && { opacity: 0.6 }]}
+            >
+              <MaterialCommunityIcons
+                name="chevron-left"
+                size={22}
+                color={isBefore(subMonths(monthViewDate, 1), startOfMonth(new Date())) ? appColors.textTertiary : appColors.textPrimary}
+              />
+            </Pressable>
+            <Text style={[styles.monthNavLabel, { color: appColors.textPrimary }]}>
+              {format(monthViewDate, "MMMM yyyy")}
+            </Text>
+            <Pressable
+              onPress={() => setMonthViewDate((d) => addMonths(d, 1))}
+              style={({ pressed }) => [styles.monthNavBtn, pressed && { opacity: 0.6 }]}
+            >
+              <MaterialCommunityIcons name="chevron-right" size={22} color={appColors.textPrimary} />
+            </Pressable>
+          </View>
+          <CalendarMonthView
+            month={monthViewDate}
+            tasks={busySlots.map((b) => ({ scheduled_start: b.start } as Task))}
+            selectedDate={selectedDate}
+            onSelectDate={(date) => {
+              if (isBefore(startOfDay(date), startOfDay(new Date()))) return;
+              setSelectedDate(date);
+              setSelectedHour(null);
+            }}
+          />
+        </ScrollView>
+      ) : (
+        <>
+          <ScrollView
+            ref={dateScrollRef}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.dateScroll}
+            contentContainerStyle={styles.dateScrollContent}
+          >
+            {dayOptions.map((day, index) => {
+              const isSelected = selectedDate.toDateString() === day.date.toDateString();
+              return (
+                <Pressable
+                  key={index}
+                  onPress={() => { setSelectedDate(day.date); setSelectedHour(null); }}
+                  style={[
+                    styles.dateChip,
+                    { backgroundColor: appColors.chipBg },
+                    isSelected && { backgroundColor: appColors.primary },
+                  ]}
+                >
+                  <Text style={[styles.dateChipDay, { color: appColors.textSecondary }, isSelected && styles.dateChipTextSelected]}>
+                    {day.shortLabel}
+                  </Text>
+                  <Text style={[styles.dateChipDate, { color: appColors.textPrimary }, isSelected && styles.dateChipTextSelected]}>
+                    {day.date.getDate()}
+                  </Text>
+                </Pressable>
+              );
+            })}
+
+            {isCustomDate && (
+              <Pressable
+                onPress={() => setShowDatePicker(true)}
+                style={[styles.dateChip, { backgroundColor: appColors.primary }]}
+              >
+                <Text style={[styles.dateChipDay, styles.dateChipTextSelected]}>
+                  {selectedDate.toLocaleDateString("en-US", { weekday: "short" })}
+                </Text>
+                <Text style={[styles.dateChipDate, styles.dateChipTextSelected]}>
+                  {formatCustomDate(selectedDate)}
+                </Text>
+              </Pressable>
+            )}
+
+            <Pressable
+              onPress={() => setShowDatePicker(true)}
+              style={[styles.dateChip, styles.moreChip, { backgroundColor: appColors.chipBg }]}
+            >
+              <MaterialCommunityIcons name="calendar" size={20} color={appColors.textTertiary} />
+              <Text style={[styles.moreChipText, { color: appColors.textTertiary }]}>More</Text>
+            </Pressable>
+          </ScrollView>
+
+          {showDatePicker && (
+            <DateTimePicker
+              value={selectedDate}
+              mode="date"
+              minimumDate={new Date()}
+              onChange={handleDatePickerChange}
+            />
+          )}
+        </>
       )}
 
-      {/* Time Selection */}
-      <Text style={styles.sectionTitle}>Select Time</Text>
-      <Text style={styles.durationHint}>
+      {/* Time Selection — hidden while month picker is open */}
+      {!showMonthView && <Text style={[styles.sectionTitle, { color: appColors.textPrimary }]}>Select Time</Text>}
+      {!showMonthView && <Text style={[styles.durationHint, { color: appColors.textSecondary }]}>
         Task duration: {task?.duration_minutes || 60} min
-      </Text>
+      </Text>}
 
-      <ScrollView
+      {!showMonthView && <ScrollView
         ref={timeScrollRef}
-        style={styles.timeScroll}
+        style={[styles.timeScroll, { backgroundColor: appColors.surface }]}
+        contentContainerStyle={[styles.timeScrollContent, { backgroundColor: appColors.surface }]}
         showsVerticalScrollIndicator={true}
-        nestedScrollEnabled={true}
       >
         {hourSlots.map((slot) => {
           const isSelected = selectedHour === slot.hour;
@@ -291,11 +309,22 @@ export default function TimeSlotPicker({
           return (
             <Pressable
               key={slot.hour}
-              onPress={() => !isDisabled && setSelectedHour(slot.hour)}
+              onPress={() => {
+                if (isDisabled) return;
+                const now = new Date();
+                const firstValidMinute = [0, 15, 30, 45].find((m) => {
+                  const t = new Date(selectedDate);
+                  t.setHours(slot.hour, m, 0, 0);
+                  return t >= now && !slot.busyMinutes.includes(m);
+                }) ?? 0;
+                setSelectedHour(slot.hour);
+                setSelectedMinute(firstValidMinute);
+              }}
               disabled={isDisabled}
               style={[
                 styles.timeSlot,
-                isSelected && styles.timeSlotSelected,
+                { backgroundColor: appColors.inputBg },
+                isSelected && [styles.timeSlotSelected, { borderColor: appColors.primary, backgroundColor: appColors.primaryLight }],
                 isDisabled && styles.timeSlotDisabled,
               ]}
             >
@@ -303,48 +332,100 @@ export default function TimeSlotPicker({
                 <View
                   style={[
                     styles.statusDot,
-                    slot.status === "available" && styles.statusAvailable,
-                    slot.status === "busy" && styles.statusBusy,
+                    slot.status === "available"
+                      ? { backgroundColor: appColors.success }
+                      : { backgroundColor: appColors.error },
                   ]}
                 />
-                <Text
-                  style={[
-                    styles.timeSlotText,
-                    isSelected && styles.timeSlotTextSelected,
-                    isDisabled && styles.timeSlotTextDisabled,
-                  ]}
-                >
-                  {slot.label}
-                </Text>
+                <View>
+                  <Text
+                    style={[
+                      styles.timeSlotText,
+                      { color: appColors.textPrimary },
+                      isSelected && { color: appColors.primary, fontWeight: "600" },
+                      isDisabled && { color: appColors.textTertiary },
+                    ]}
+                  >
+                    {slot.label}
+                  </Text>
+                  {/* Runs past midnight warning */}
+                  {slot.bleeds && slot.status === "available" && (
+                    <Text style={[styles.bleedsNote, { color: appColors.warning }]}>
+                      Runs past midnight
+                    </Text>
+                  )}
+                  {/* Minute chips — shown only on selected slot */}
+                  {isSelected && (
+                    <View style={styles.minuteRow}>
+                      {[0, 15, 30, 45].map((m) => {
+                        const candidateTime = new Date(selectedDate);
+                        candidateTime.setHours(slot.hour, m, 0, 0);
+                        const isMinutePast = candidateTime < new Date();
+                        const isMinuteBusy = slot.busyMinutes.includes(m);
+                        const isMinuteDisabled = isMinutePast || isMinuteBusy;
+                        return (
+                          <Pressable
+                            key={m}
+                            onPress={(e) => { e.stopPropagation?.(); if (!isMinuteDisabled) setSelectedMinute(m); }}
+                            disabled={isMinuteDisabled}
+                            style={[
+                              styles.minuteChip,
+                              { backgroundColor: appColors.surface },
+                              selectedMinute === m && { backgroundColor: appColors.primary },
+                              isMinuteDisabled && { opacity: 0.3 },
+                            ]}
+                          >
+                            <Text style={[
+                              styles.minuteChipText,
+                              { color: appColors.textSecondary },
+                              selectedMinute === m && { color: "#fff", fontWeight: "600" },
+                            ]}>
+                              :{String(m).padStart(2, "0")}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
               </View>
               <Text
                 style={[
                   styles.statusText,
-                  slot.status === "available" && styles.statusTextAvailable,
-                  slot.status === "busy" && styles.statusTextBusy,
+                  slot.status === "available"
+                    ? { color: appColors.success }
+                    : { color: appColors.textTertiary },
                 ]}
               >
-                {slot.status === "available"
-                  ? "Available"
-                  : slot.busyReason || "Busy"}
+                {slot.status === "available" ? "Available" : slot.busyReason || "Busy"}
               </Text>
             </Pressable>
           );
         })}
-      </ScrollView>
+      </ScrollView>}
 
-      {/* Confirm Button */}
-      <View style={styles.footer}>
-        <Button
-          mode="contained"
-          onPress={handleSelectSlot}
-          disabled={selectedHour === null}
-          style={styles.confirmButton}
-        >
-          {selectedHour !== null
-            ? `Schedule at ${formatSelectedTime()}`
-            : "Select a time slot"}
-        </Button>
+      {/* Footer */}
+      <View style={[styles.footer, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
+        {showMonthView ? (
+          <Pressable
+            style={[styles.monthConfirmBtn, { backgroundColor: appColors.primary }]}
+            onPress={() => setShowMonthView(false)}
+          >
+            <Text style={styles.monthConfirmText}>
+              View times for {format(selectedDate, "EEE, d MMM")}
+            </Text>
+            <MaterialCommunityIcons name="arrow-right" size={16} color="#fff" />
+          </Pressable>
+        ) : (
+          <Button
+            mode="contained"
+            onPress={handleSelectSlot}
+            disabled={selectedHour === null}
+            style={styles.confirmButton}
+          >
+            {buttonLabel}
+          </Button>
+        )}
       </View>
     </View>
   );
@@ -354,12 +435,53 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  dateSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+    flexShrink: 0,
+  },
   sectionTitle: {
     fontSize: 16,
     fontWeight: "600",
+  },
+  monthViewToggle: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  monthViewContainer: {
+    flex: 1,
+  },
+  monthConfirmBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
+    width: "100%",
+  },
+  monthConfirmText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#fff",
+  },
+  monthNav: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     marginBottom: 8,
-    color: "#333",
-    flexShrink: 0,
+  },
+  monthNavBtn: {
+    padding: 4,
+  },
+  monthNavLabel: {
+    fontSize: 15,
+    fontWeight: "600",
   },
   dateScroll: {
     marginBottom: 16,
@@ -374,42 +496,36 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 12,
-    backgroundColor: "#f5f5f5",
     minWidth: 60,
-  },
-  dateChipSelected: {
-    backgroundColor: "#2196F3",
   },
   dateChipDay: {
     fontSize: 12,
-    color: "#666",
     marginBottom: 4,
   },
   dateChipDate: {
     fontSize: 18,
     fontWeight: "bold",
-    color: "#333",
   },
   dateChipTextSelected: {
     color: "#fff",
   },
   moreChip: {
-    backgroundColor: "#f0f0f0",
     justifyContent: "center",
     gap: 4,
   },
   moreChipText: {
     fontSize: 12,
-    color: "#666",
   },
   durationHint: {
     fontSize: 14,
-    color: "#666",
     marginBottom: 8,
     flexShrink: 0,
   },
   timeScroll: {
     flex: 1,
+  },
+  timeScrollContent: {
+    paddingBottom: 8,
   },
   timeSlot: {
     flexDirection: "row",
@@ -419,16 +535,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     borderRadius: 10,
     marginBottom: 8,
-    backgroundColor: "#f8f8f8",
   },
   timeSlotSelected: {
-    backgroundColor: "#E3F2FD",
     borderWidth: 2,
-    borderColor: "#2196F3",
   },
   timeSlotDisabled: {
-    backgroundColor: "#fafafa",
-    opacity: 0.7,
+    opacity: 0.5,
   },
   timeSlotLeft: {
     flexDirection: "row",
@@ -440,38 +552,35 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
   },
-  statusAvailable: {
-    backgroundColor: "#4CAF50",
-  },
-  statusBusy: {
-    backgroundColor: "#f44336",
-  },
   timeSlotText: {
     fontSize: 16,
     fontWeight: "500",
-    color: "#333",
   },
-  timeSlotTextSelected: {
-    color: "#2196F3",
-    fontWeight: "600",
+  bleedsNote: {
+    fontSize: 11,
+    marginTop: 2,
   },
-  timeSlotTextDisabled: {
-    color: "#999",
+  minuteRow: {
+    flexDirection: "row",
+    gap: 6,
+    marginTop: 8,
+  },
+  minuteChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  minuteChipText: {
+    fontSize: 13,
+    fontWeight: "500",
   },
   statusText: {
     fontSize: 14,
   },
-  statusTextAvailable: {
-    color: "#4CAF50",
-  },
-  statusTextBusy: {
-    color: "#999",
-  },
   footer: {
     paddingTop: 12,
-    paddingBottom: 16,
+    paddingBottom: 12,
     borderTopWidth: 1,
-    borderTopColor: "#f0f0f0",
     flexShrink: 0,
   },
   confirmButton: {},

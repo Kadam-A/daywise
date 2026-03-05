@@ -12,6 +12,7 @@ import React, { useMemo } from "react";
 import { View, StyleSheet, Pressable } from "react-native";
 import { Text } from "react-native-paper";
 import { Task } from "@/lib/types";
+import { useAppColors } from "@/contexts/ThemeContext";
 import {
   format,
   isSameDay,
@@ -24,6 +25,17 @@ import {
   addDays,
   parseISO,
 } from "date-fns";
+
+// Static defaults for StyleSheet.create (overridden dynamically in component)
+const COLORS = {
+  primary: "#4A90E2",
+  textPrimary: "#1A1D23",
+  textSecondary: "#5C6370",
+  textTertiary: "#9CA3AF",
+  background: "#F8F9FB",
+  surface: "#FFFFFF",
+  border: "#E5E7EB",
+};
 
 interface CalendarMonthViewProps {
   month: Date;
@@ -40,6 +52,7 @@ export default function CalendarMonthView({
   selectedDate,
   onSelectDate,
 }: CalendarMonthViewProps) {
+  const COLORS = useAppColors();
   // Generate calendar grid (weeks x 7 days)
   const calendarDays = useMemo(() => {
     const monthStart = startOfMonth(month);
@@ -73,12 +86,12 @@ export default function CalendarMonthView({
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: COLORS.surface }]}>
       {/* Weekday headers */}
       <View style={styles.weekdayHeader}>
         {WEEKDAYS.map((day) => (
           <View key={day} style={styles.weekdayCell}>
-            <Text style={styles.weekdayText}>{day}</Text>
+            <Text style={[styles.weekdayText, { color: COLORS.textTertiary }]}>{day}</Text>
           </View>
         ))}
       </View>
@@ -97,17 +110,18 @@ export default function CalendarMonthView({
                 key={day.toISOString()}
                 style={[
                   styles.dayCell,
-                  isSelected && styles.dayCellSelected,
-                  isCurrentDay && !isSelected && styles.dayCellToday,
+                  isSelected && { backgroundColor: COLORS.primary },
+                  isCurrentDay && !isSelected && { backgroundColor: COLORS.primaryLight },
                 ]}
                 onPress={() => onSelectDate(day)}
               >
                 <Text
                   style={[
                     styles.dayNumber,
-                    !isCurrentMonth && styles.dayNumberOutside,
-                    isSelected && styles.dayNumberSelected,
-                    isCurrentDay && !isSelected && styles.dayNumberToday,
+                    { color: COLORS.textPrimary },
+                    !isCurrentMonth && { color: COLORS.textTertiary },
+                    isSelected && { color: "#FFFFFF" },
+                    isCurrentDay && !isSelected && { color: COLORS.primary, fontWeight: "700" },
                   ]}
                 >
                   {format(day, "d")}
@@ -122,8 +136,9 @@ export default function CalendarMonthView({
                           key={i}
                           style={[
                             styles.dot,
-                            isSelected && styles.dotSelected,
-                            !isCurrentMonth && styles.dotOutside,
+                            { backgroundColor: COLORS.primary },
+                            isSelected && { backgroundColor: "#FFFFFF" },
+                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
                           ]}
                         />
                       ))
@@ -132,22 +147,25 @@ export default function CalendarMonthView({
                         <View
                           style={[
                             styles.dot,
-                            isSelected && styles.dotSelected,
-                            !isCurrentMonth && styles.dotOutside,
+                            { backgroundColor: COLORS.primary },
+                            isSelected && { backgroundColor: "#FFFFFF" },
+                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
                           ]}
                         />
                         <View
                           style={[
                             styles.dot,
-                            isSelected && styles.dotSelected,
-                            !isCurrentMonth && styles.dotOutside,
+                            { backgroundColor: COLORS.primary },
+                            isSelected && { backgroundColor: "#FFFFFF" },
+                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
                           ]}
                         />
                         <View
                           style={[
                             styles.dot,
-                            isSelected && styles.dotSelected,
-                            !isCurrentMonth && styles.dotOutside,
+                            { backgroundColor: COLORS.primary },
+                            isSelected && { backgroundColor: "#FFFFFF" },
+                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
                           ]}
                         />
                       </>
@@ -165,8 +183,8 @@ export default function CalendarMonthView({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: "#ffffff",
-    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
     padding: 8,
   },
   weekdayHeader: {
@@ -181,7 +199,7 @@ const styles = StyleSheet.create({
   weekdayText: {
     fontSize: 12,
     fontWeight: "600",
-    color: "#94a3b8",
+    color: COLORS.textTertiary,
   },
   weekRow: {
     flexDirection: "row",
@@ -191,28 +209,28 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 8,
+    borderRadius: 10,
     margin: 2,
   },
   dayCellSelected: {
-    backgroundColor: "#2563eb",
+    backgroundColor: COLORS.primary,
   },
   dayCellToday: {
-    backgroundColor: "#eff6ff",
+    backgroundColor: "#EBF4FF",
   },
   dayNumber: {
     fontSize: 14,
     fontWeight: "500",
-    color: "#1e293b",
+    color: COLORS.textPrimary,
   },
   dayNumberOutside: {
-    color: "#cbd5e1",
+    color: COLORS.textTertiary,
   },
   dayNumberSelected: {
-    color: "#ffffff",
+    color: COLORS.surface,
   },
   dayNumberToday: {
-    color: "#2563eb",
+    color: COLORS.primary,
     fontWeight: "700",
   },
   dotsContainer: {
@@ -225,12 +243,12 @@ const styles = StyleSheet.create({
     width: 4,
     height: 4,
     borderRadius: 2,
-    backgroundColor: "#2563eb",
+    backgroundColor: COLORS.primary,
   },
   dotSelected: {
-    backgroundColor: "#ffffff",
+    backgroundColor: COLORS.surface,
   },
   dotOutside: {
-    backgroundColor: "#cbd5e1",
+    backgroundColor: COLORS.textTertiary,
   },
 });
