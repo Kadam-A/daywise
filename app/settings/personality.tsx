@@ -5,7 +5,7 @@
  * Allows manual adjustment without retaking the full quiz
  */
 
-import { View, StyleSheet, ScrollView, Pressable } from "react-native";
+import { View, StyleSheet, ScrollView, Pressable, Alert } from "react-native";
 import {
   Text,
   Button,
@@ -17,6 +17,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
+import { trackPersonalityUpdated } from "@/lib/analytics";
 import Slider from "@react-native-community/slider";
 import { PersonalityData } from "@/lib/types";
 import { useAppColors } from "@/contexts/ThemeContext";
@@ -140,11 +141,7 @@ export default function PersonalityScreen() {
   };
 
   const handleSliderChange = (key: keyof PersonalityData, value: number) => {
-    if (!personality) return;
-    setPersonality({
-      ...personality,
-      [key]: Math.round(value),
-    });
+    setPersonality((prev) => prev ? { ...prev, [key]: Math.round(value) } : prev);
   };
 
   const handleSave = async () => {
@@ -161,25 +158,45 @@ export default function PersonalityScreen() {
         peakWindows.every((w) => w.start >= 15) ? 20 :
         50;
 
+      // Re-fetch latest personality_data from DB before saving to avoid
+      // overwriting keys set by other screens (e.g. preferred_windows from Work Hours)
+      const { data: freshProfile } = await supabase
+        .from("user_profiles")
+        .select("personality_data")
+        .eq("id", user?.id)
+        .single();
+
+      // Only apply the slider fields managed by this screen.
+      // All other keys (preferred_windows, auto_reschedule_*) come exclusively
+      // from the fresh DB fetch so they are never overwritten by stale local state.
       const updatedPersonality: PersonalityData = {
-        ...personality,
+        ...freshProfile?.personality_data,
+        focus_duration: personality.focus_duration,
+        deadline_style: personality.deadline_style,
+        break_frequency: personality.break_frequency,
+        task_switching: personality.task_switching,
+        structure_preference: personality.structure_preference,
         chronotype: derivedChronotype,
         peak_windows: peakWindows.length > 0 ? peakWindows : undefined,
       };
 
-      const { error } = await supabase
+      const { error, count } = await supabase
         .from("user_profiles")
         .update({ personality_data: updatedPersonality })
-        .eq("id", user?.id);
+        .eq("id", user?.id)
+        .select();
 
       if (error) throw error;
+      if (count === 0) throw new Error("No rows updated — profile may not exist");
 
       setPersonality(updatedPersonality);
       setOriginalPersonality(updatedPersonality);
       setOriginalPeakWindows(peakWindows);
+      trackPersonalityUpdated(); // fire-and-forget
       router.back();
     } catch (error) {
       console.error("[Personality] Error saving:", error);
+      Alert.alert("Save Failed", "Your changes couldn't be saved. Please try again.");
     } finally {
       setSaving(false);
     }

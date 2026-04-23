@@ -20,10 +20,12 @@ export const NEW_USER_STORAGE_KEYS = [
   "tasks_completed_count",
   "happiness_check_shown",
   "guidedTourStep",
+  "tourDemoTasksCreated",
 ];
 
 // Default personality_data that triggers the onboarding route in app/index.tsx.
 // Must stay in sync with the detection logic there (all numeric fields === 50).
+// Note: auto_reschedule_* fields live in dedicated columns now, not here.
 export const DEFAULT_PERSONALITY_DATA = {
   chronotype: 50,
   focus_duration: 50,
@@ -33,9 +35,6 @@ export const DEFAULT_PERSONALITY_DATA = {
   structure_preference: 50,
   preferred_windows: [],
   additional_context: null,
-  auto_reschedule_enabled: true,
-  auto_reschedule_morning: 540,
-  auto_reschedule_evening: 1140,
 };
 
 /**
@@ -46,10 +45,16 @@ export async function resetToNewUserState(): Promise<void> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("No authenticated user");
 
-  // 1. Reset personality_data → makes index.tsx route to onboarding
+  // 1. Reset personality_data + dedicated columns → makes index.tsx route to onboarding
   await supabase
     .from("user_profiles")
-    .update({ personality_data: DEFAULT_PERSONALITY_DATA })
+    .update({
+      personality_data: DEFAULT_PERSONALITY_DATA,
+      auto_reschedule_enabled: true,
+      auto_reschedule_morning: 540,
+      auto_reschedule_evening: 1140,
+      auto_reschedule_tz_offset: null,
+    })
     .eq("id", user.id);
 
   // 2. Clear all static first-time keys
@@ -59,4 +64,11 @@ export async function resetToNewUserState(): Promise<void> {
   const allKeys = await AsyncStorage.getAllKeys();
   const dynamicKeys = allKeys.filter((k) => k.startsWith("autoRescheduleDate_"));
   if (dynamicKeys.length > 0) await AsyncStorage.multiRemove(dynamicKeys);
+
+  // 4. Delete demo tasks so they're recreated fresh on next tour start
+  await supabase
+    .from("tasks")
+    .delete()
+    .eq("user_id", user.id)
+    .contains("tags", ["demo"]);
 }

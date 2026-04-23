@@ -156,10 +156,9 @@ function generateAllSlots(
       (w) => w.day === dayOfWeek,
     );
 
-    // If the user has configured work windows but this day isn't in them, skip it entirely.
-    // (e.g. Mon–Fri only → weekends are excluded)
-    // If no windows configured at all, fall back to defaults for every day.
-    if (hasCustomWindows && !preferredWindow) continue;
+    // Days outside preferred windows are still included but will receive a score
+    // penalty in calculateSlotScoreWithFactors — not excluded entirely.
+    // This ensures weekends and off-days are available as fallback options.
 
     let startHour = DEFAULT_START;
     let endHour = DEFAULT_END;
@@ -249,6 +248,15 @@ function calculateSlotScoreWithFactors(
       factors.push({ name, impact, description, icon });
     }
   };
+
+  // 0. Preferred window check — penalise but don't exclude off-days
+  const hasCustomWindows = personality.preferred_windows && personality.preferred_windows.length > 0;
+  const preferredWindow = personality.preferred_windows?.find((w) => w.day === dayOfWeek);
+  if (hasCustomWindows && !preferredWindow) {
+    const offDayImpact = -25;
+    score += offDayImpact;
+    addFactor("preferred_days", offDayImpact, "Outside your usual work days", "calendar-weekend");
+  }
 
   // 1. Chronotype
   const chronotypeImpact = applyChronotypeFilter(personality, hour);

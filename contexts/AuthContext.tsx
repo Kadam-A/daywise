@@ -8,6 +8,9 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react';
 import { User, Session } from '@supabase/supabase-js';
 import { supabase, signOut as supabaseSignOut } from '@/lib/supabase';
+import { setSentryUser, clearSentryUser } from '@/lib/sentry';
+import { identifyUser, resetUser as resetPostHogUser, capture as capturePostHog } from '@/lib/posthog';
+import { trackSignedIn } from '@/lib/analytics';
 
 export type UserRole = 'user' | 'admin' | 'super_admin';
 
@@ -83,7 +86,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (currentSession?.user) {
           setSession(currentSession);
           setUser(currentSession.user);
-          await fetchRole(currentSession.user.id);
+          // fetchRole is called by the user?.id effect below — no duplicate call needed
+          setSentryUser(currentSession.user.id, currentSession.user.email);
+          identifyUser(currentSession.user.id, currentSession.user.email);
         }
       } catch (err) {
         console.error('[AuthContext] Init error:', err);
@@ -94,21 +99,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     initAuth();
 
-    // Listen for auth changes
+    // Listen for auth changes.
+    // IMPORTANT: Do NOT call supabase.rpc() / supabase.from() / supabase.auth.getSession()
+    // inside this callback. Supabase awaits all onAuthStateChange callbacks while holding
+    // the auth mutex. Any supabase.* call here will try to re-acquire that mutex → deadlock.
     const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange(
-      async (event, newSession) => {
+      (event, newSession) => {
         console.log('[AuthContext] Auth event:', event);
 
         if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
           setSession(newSession);
           setUser(newSession?.user ?? null);
           if (newSession?.user) {
-            await fetchRole(newSession.user.id);
+            setSentryUser(newSession.user.id, newSession.user.email);
+            identifyUser(newSession.user.id, newSession.user.email);
+            if (event === 'SIGNED_IN') trackSignedIn();
           }
         } else if (event === 'SIGNED_OUT') {
           setSession(null);
           setUser(null);
           setRole('user');
+          clearSentryUser();
+          capturePostHog('user_signed_out');
+          resetPostHogUser();
         }
 
         setIsLoading(false);
@@ -118,7 +131,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       authSubscription.unsubscribe();
     };
-  }, [fetchRole]);
+  }, []);
+
+  // Fetch role whenever the authenticated user changes.
+  // This runs in a React effect — completely outside the Supabase auth mutex.
+  useEffect(() => {
+    if (user?.id) {
+      fetchRole(user.id);
+    }
+  }, [user?.id, fetchRole]);
 
   // Sign out handler
   const handleSignOut = useCallback(async () => {

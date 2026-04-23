@@ -1,8 +1,5 @@
 /**
  * ComprehensiveFeedbackModal - Full feedback form for Settings
- *
- * More detailed feedback form with categories, description,
- * optional email, and checkboxes for logs/beta testing.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -14,14 +11,13 @@ import {
   ScrollView,
   KeyboardAvoidingView,
   Platform,
+  TextInput,
 } from 'react-native';
-import { Text, TextInput, Button, Checkbox } from 'react-native-paper';
+import { Text, Button } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 
-import {
-  FeedbackCategory,
-} from '@/lib/types';
+import { FeedbackCategory } from '@/lib/types';
 import {
   submitComprehensiveFeedback,
   COMPREHENSIVE_FEEDBACK_CATEGORIES,
@@ -29,6 +25,7 @@ import {
   FEEDBACK_CATEGORY_ICONS,
 } from '@/lib/feedback';
 import { useAppColors } from '@/contexts/ThemeContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface ComprehensiveFeedbackModalProps {
   visible: boolean;
@@ -42,28 +39,23 @@ export default function ComprehensiveFeedbackModal({
   initialCategory,
 }: ComprehensiveFeedbackModalProps) {
   const appColors = useAppColors();
+  const insets = useSafeAreaInsets();
   const [category, setCategory] = useState<FeedbackCategory | null>(initialCategory || null);
   const [description, setDescription] = useState('');
   const [email, setEmail] = useState('');
-  const [includeLogs, setIncludeLogs] = useState(false);
-  const [wantsBetaTest, setWantsBetaTest] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset form when modal opens with initial category
   useEffect(() => {
     if (visible) {
       setCategory(initialCategory || null);
       setDescription('');
       setEmail('');
-      setIncludeLogs(false);
-      setWantsBetaTest(false);
       setError(null);
     }
   }, [visible, initialCategory]);
 
   const handleSubmit = async () => {
-    // Validate
     if (!category) {
       setError('Please select a category');
       return;
@@ -79,8 +71,6 @@ export default function ComprehensiveFeedbackModal({
     try {
       const result = await submitComprehensiveFeedback(category, description.trim(), {
         email: email.trim() || undefined,
-        includeLogs,
-        wantsBetaTest,
       });
 
       if (result.success) {
@@ -136,21 +126,21 @@ export default function ComprehensiveFeedbackModal({
                     key={cat}
                     style={[
                       styles.categoryButton,
-                      { borderColor: appColors.border, backgroundColor: appColors.surface },
-                      category === cat && { borderColor: appColors.aiPurple, backgroundColor: `${appColors.aiPurple}10` },
+                      { borderColor: appColors.border, backgroundColor: appColors.chipBg },
+                      category === cat && { borderColor: appColors.aiPurple, backgroundColor: `${appColors.aiPurple}12` },
                     ]}
                     onPress={() => setCategory(cat)}
                   >
                     <MaterialCommunityIcons
                       name={FEEDBACK_CATEGORY_ICONS[cat] as any}
-                      size={20}
+                      size={18}
                       color={category === cat ? appColors.aiPurple : appColors.textSecondary}
                     />
                     <Text
                       style={[
                         styles.categoryText,
                         { color: appColors.textSecondary },
-                        category === cat && { color: appColors.aiPurple, fontWeight: '500' },
+                        category === cat && { color: appColors.aiPurple, fontWeight: '600' },
                       ]}
                       numberOfLines={2}
                     >
@@ -162,65 +152,39 @@ export default function ComprehensiveFeedbackModal({
 
               {/* Description */}
               <Text style={[styles.label, { color: appColors.textPrimary }]}>Tell us more *</Text>
-              <TextInput
-                mode="outlined"
-                placeholder="Describe your feedback in detail..."
-                value={description}
-                onChangeText={setDescription}
-                multiline
-                numberOfLines={5}
-                maxLength={500}
-                style={[styles.textArea, { backgroundColor: appColors.surface }]}
-                outlineColor={appColors.border}
-                activeOutlineColor={appColors.aiPurple}
-                textColor={appColors.textPrimary}
-                placeholderTextColor={appColors.textTertiary}
-              />
+              <View style={[styles.inputBox, { backgroundColor: appColors.chipBg, borderColor: appColors.border }]}>
+                <TextInput
+                  placeholder="Describe your feedback in detail..."
+                  placeholderTextColor={appColors.textTertiary}
+                  value={description}
+                  onChangeText={setDescription}
+                  multiline
+                  numberOfLines={5}
+                  maxLength={500}
+                  style={[styles.textArea, { color: appColors.textPrimary }]}
+                  textAlignVertical="top"
+                />
+              </View>
               <Text style={[styles.charCount, { color: appColors.textTertiary }]}>
-                {description.length}/500 characters
+                {description.length}/500
               </Text>
 
               {/* Email */}
               <Text style={[styles.label, { color: appColors.textPrimary }]}>Email (optional)</Text>
-              <TextInput
-                mode="outlined"
-                placeholder="your@email.com"
-                value={email}
-                onChangeText={setEmail}
-                keyboardType="email-address"
-                autoCapitalize="none"
-                style={[styles.input, { backgroundColor: appColors.surface }]}
-                outlineColor={appColors.border}
-                activeOutlineColor={appColors.aiPurple}
-                textColor={appColors.textPrimary}
-                placeholderTextColor={appColors.textTertiary}
-              />
+              <View style={[styles.inputBox, { backgroundColor: appColors.chipBg, borderColor: appColors.border }]}>
+                <TextInput
+                  placeholder="your@email.com"
+                  placeholderTextColor={appColors.textTertiary}
+                  value={email}
+                  onChangeText={setEmail}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  style={[styles.singleInput, { color: appColors.textPrimary }]}
+                />
+              </View>
               <Text style={[styles.hint, { color: appColors.textTertiary }]}>
                 We'll only use this to follow up on your feedback
               </Text>
-
-              {/* Checkboxes */}
-              <View style={styles.checkboxRow}>
-                <Checkbox
-                  status={includeLogs ? 'checked' : 'unchecked'}
-                  onPress={() => setIncludeLogs(!includeLogs)}
-                  color={appColors.aiPurple}
-                />
-                <Pressable onPress={() => setIncludeLogs(!includeLogs)} style={styles.checkboxLabel}>
-                  <Text style={[styles.checkboxText, { color: appColors.textSecondary }]}>Include app logs (helps us debug)</Text>
-                </Pressable>
-              </View>
-
-              <View style={styles.checkboxRow}>
-                <Checkbox
-                  status={wantsBetaTest ? 'checked' : 'unchecked'}
-                  onPress={() => setWantsBetaTest(!wantsBetaTest)}
-                  color={appColors.aiPurple}
-                />
-                <Pressable onPress={() => setWantsBetaTest(!wantsBetaTest)} style={styles.checkboxLabel}>
-                  <Text style={[styles.checkboxText, { color: appColors.textSecondary }]}>I'm willing to beta test fixes</Text>
-                </Pressable>
-              </View>
 
               {/* Error */}
               {error && (
@@ -232,7 +196,7 @@ export default function ComprehensiveFeedbackModal({
             </ScrollView>
 
             {/* Footer */}
-            <View style={[styles.footer, { borderTopColor: appColors.border }]}>
+            <View style={[styles.footer, { borderTopColor: appColors.border, paddingBottom: insets.bottom + 12 }]}>
               <Button
                 mode="outlined"
                 onPress={onClose}
@@ -293,25 +257,26 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     padding: 20,
+    gap: 4,
   },
   label: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    marginBottom: 8,
-    marginTop: 8,
+    marginTop: 12,
+    marginBottom: 6,
   },
   categoryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 4,
   },
   categoryButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 9,
     borderRadius: 10,
     borderWidth: 1,
   },
@@ -319,35 +284,35 @@ const styles = StyleSheet.create({
     fontSize: 13,
     maxWidth: 100,
   },
+  inputBox: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
   textArea: {
-    maxHeight: 120,
+    fontSize: 14,
+    minHeight: 100,
+    lineHeight: 20,
+  },
+  singleInput: {
+    fontSize: 14,
+    paddingVertical: 4,
   },
   charCount: {
     fontSize: 12,
     textAlign: 'right',
     marginTop: 4,
   },
-  input: {},
   hint: {
     fontSize: 12,
     marginTop: 4,
-  },
-  checkboxRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 12,
-  },
-  checkboxLabel: {
-    flex: 1,
-  },
-  checkboxText: {
-    fontSize: 14,
   },
   errorContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 16,
+    marginTop: 12,
     padding: 12,
     borderRadius: 10,
   },

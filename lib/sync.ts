@@ -13,6 +13,7 @@ import {
   saveLastSyncTime,
   PendingOperation,
 } from './offline';
+import { trackTaskCompleted } from './analytics';
 
 const MAX_RETRIES = 5;
 
@@ -153,6 +154,8 @@ async function processCompleteTask(payload: Record<string, unknown>): Promise<vo
     .eq('id', taskId);
 
   if (error) throw error;
+
+  trackTaskCompleted(); // fire-and-forget
 }
 
 async function processCreateTask(payload: Record<string, unknown>): Promise<void> {

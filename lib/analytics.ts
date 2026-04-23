@@ -7,6 +7,16 @@
 
 import { supabase } from './supabase';
 import { AnalyticsEventName } from './types';
+import { capture, posthog } from './posthog';
+import type { PostHogEventProperties } from '@posthog/core';
+
+/**
+ * Capture an exception in PostHog error tracking.
+ * Call this in catch blocks for critical user-facing operations.
+ */
+export function captureException(err: unknown, context?: PostHogEventProperties): void {
+  posthog.captureException(err, context);
+}
 
 /**
  * Track an analytics event
@@ -17,10 +27,13 @@ export async function trackEvent(
   eventName: AnalyticsEventName,
   data?: Record<string, any>
 ): Promise<void> {
+  // Fire to PostHog immediately (non-blocking, no user required)
+  capture(eventName, data);
+
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
-      console.log('[Analytics] No user, skipping event:', eventName);
+      console.log('[Analytics] No user, skipping Supabase event:', eventName);
       return;
     }
 
@@ -235,6 +248,34 @@ export function trackCalendarSyncFailed(error: string): Promise<void> {
 }
 
 /**
+ * Track task reschedule
+ */
+export function trackTaskRescheduled(method: 'drag' | 'modal' = 'drag'): Promise<void> {
+  return trackEvent('task_rescheduled', { method });
+}
+
+/**
+ * Track task deletion
+ */
+export function trackTaskDeleted(): Promise<void> {
+  return trackEvent('task_deleted');
+}
+
+/**
+ * Track sign in
+ */
+export function trackSignedIn(): Promise<void> {
+  return trackEvent('user_signed_in');
+}
+
+/**
+ * Track personality/settings update
+ */
+export function trackPersonalityUpdated(): Promise<void> {
+  return trackEvent('settings_updated', { type: 'personality' });
+}
+
+/**
  * Track review flow events
  */
 export function trackHappinessCheckShown(): Promise<void> {
@@ -249,9 +290,6 @@ export function trackFeedbackSubmitted(category: string, triggerPoint: string): 
   return trackEvent('feedback_submitted', { category, trigger_point: triggerPoint });
 }
 
-export function trackFeedbackSkipped(): Promise<void> {
-  return trackEvent('feedback_skipped');
-}
 
 export function trackReviewTrialGranted(reason: string): Promise<void> {
   return trackEvent('review_trial_granted', { reason });
@@ -260,6 +298,58 @@ export function trackReviewTrialGranted(reason: string): Promise<void> {
 /**
  * Track individual onboarding step completion
  */
-export function trackOnboardingStep(step: number, question: string): Promise<void> {
-  return trackEvent('onboarding_step_completed', { step, question });
+export function trackOnboardingStep(step: number, question: string, answerValue?: string): Promise<void> {
+  return trackEvent('onboarding_step_completed', { step, question, answer_value: answerValue ?? null });
+}
+
+/**
+ * Track which onboarding screen the user viewed (for drop-off analysis)
+ */
+export function trackOnboardingScreenViewed(step: number, name: string): Promise<void> {
+  return trackEvent('onboarding_screen_viewed', { step, name });
+}
+
+/**
+ * Track when user abandons onboarding mid-flow
+ */
+export function trackOnboardingAbandoned(step: number, name: string): Promise<void> {
+  return trackEvent('onboarding_abandoned', { step, name });
+}
+
+/**
+ * Track guided tour step viewed
+ */
+export function trackTourStepViewed(step: string, sessionId?: string, stepDurationMs?: number): Promise<void> {
+  return trackEvent('tour_step_viewed', {
+    step,
+    ...(sessionId && { session_id: sessionId }),
+    ...(stepDurationMs !== undefined && { step_duration_ms: stepDurationMs }),
+  });
+}
+
+/**
+ * Track guided tour skipped (with which step the user was on)
+ */
+export function trackTourSkipped(fromStep: string, sessionId?: string): Promise<void> {
+  return trackEvent('tour_skipped', {
+    from_step: fromStep,
+    ...(sessionId && { session_id: sessionId }),
+  });
+}
+
+/**
+ * Track guided tour completed
+ */
+export function trackTourCompleted(sessionId?: string, isManualTour?: boolean): Promise<void> {
+  return trackEvent('tour_completed', {
+    ...(sessionId && { session_id: sessionId }),
+    ...(isManualTour !== undefined && { is_manual_tour: isManualTour }),
+  });
+}
+
+/**
+ * Track AI scheduling during guided tour
+ */
+export function trackTourAIScheduled(): Promise<void> {
+  return trackEvent('guided_tour_ai_scheduled');
 }

@@ -52,12 +52,6 @@ export interface PersonalityData {
     end: string; // HH:MM format (e.g., "17:00")
   }>;
 
-  // OPTIONAL: Auto-reschedule settings (twice daily)
-  auto_reschedule_enabled?: boolean; // Default: true
-  auto_reschedule_morning?: number;  // Minutes from midnight (0-1439), default 540 (9:00am)
-  auto_reschedule_evening?: number;  // Minutes from midnight (0-1439), default 1140 (7:00pm)
-  auto_reschedule_tz_offset?: number; // Device UTC offset in hours (e.g. -5 for EST, 5.5 for IST)
-
   // OPTIONAL: Free-form context (captured in Settings, not onboarding)
   additional_context?: string; // Max 500 chars, e.g., "I have ADHD and need visual timers"
 }
@@ -67,17 +61,23 @@ export interface PersonalityData {
  * Links to Supabase auth.users via id
  */
 export interface UserProfile {
-  id: string; // UUID, references auth.users(id)
-  display_name: string | null; // User's display name, auto-populated from Google
+  id: string;
+  display_name: string | null;
   personality_data: PersonalityData;
+  // Dedicated auto-reschedule columns (not in personality_data JSONB)
+  auto_reschedule_enabled: boolean;
+  auto_reschedule_morning: number;    // minutes from midnight, default 540
+  auto_reschedule_evening: number;    // minutes from midnight, default 1140
+  auto_reschedule_tz_name: string | null;   // IANA e.g. "America/New_York" (DST-aware)
+  auto_reschedule_tz_offset: number | null; // fallback numeric offset (hours)
   preferences: {
     theme?: "light" | "dark" | "system";
     notifications_enabled?: boolean;
-    default_task_duration?: number; // minutes
-    work_days?: number[]; // [1,2,3,4,5] for Mon-Fri
+    default_task_duration?: number;
+    work_days?: number[];
   };
-  created_at: string; // ISO 8601 timestamp
-  updated_at: string; // ISO 8601 timestamp
+  created_at: string;
+  updated_at: string;
 }
 
 // ===========================================
@@ -159,7 +159,7 @@ export interface Task {
 export interface RecurrenceRule {
   frequency: "daily" | "weekly" | "monthly";
   days?: number[]; // For weekly: 1=Mon, 2=Tue, ..., 7=Sun
-  // No end date for MVP - runs forever
+  end_count?: number; // If set, stop generating after this many total instances
 }
 
 /**
@@ -490,7 +490,7 @@ export interface PlanFeatures {
   ai_scheduling: boolean;
   recurring_tasks: number;       // -1 = unlimited
   task_history_days: number;     // -1 = unlimited
-  auto_reschedule_per_week: number; // -1 = unlimited, 1 = free tier
+  auto_reschedule_per_week: number; // -1 = unlimited, 0 = not available (free)
 }
 
 /**
@@ -540,8 +540,21 @@ export type AnalyticsEventName =
   | 'review_trial_granted'
   // Onboarding & guided tour events
   | 'onboarding_step_completed'
+  | 'onboarding_screen_viewed'
   | 'guided_tour_started'
-  | 'guided_tour_completed';
+  | 'guided_tour_completed'
+  | 'tour_step_viewed'
+  | 'tour_skipped'
+  | 'tour_completed'
+  | 'onboarding_abandoned'
+  | 'guided_tour_ai_scheduled'
+  // User events
+  | 'user_signed_in'
+  | 'user_signed_out'
+  // Settings events
+  | 'settings_updated'
+  // Task events
+  | 'task_rescheduled';
 
 /**
  * User funnel tracking record

@@ -5,11 +5,10 @@
  * Clean, focused interface that guides users naturally
  */
 
-import { View, StyleSheet, ScrollView, Pressable, Platform, KeyboardAvoidingView, Animated } from "react-native";
+import { View, StyleSheet, ScrollView, Pressable, Platform, KeyboardAvoidingView, Animated, Keyboard } from "react-native";
 import { Text, TextInput, HelperText, ActivityIndicator } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { LinearGradient } from "expo-linear-gradient";
 import { useState, useCallback, useEffect, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, useLocalSearchParams, useFocusEffect } from "expo-router";
@@ -22,7 +21,7 @@ import { Task, TimeSlot, UserProfile, CalendarEvent, RecurrenceRule } from "@/li
 import { safeCreateCalendarEvent } from "@/lib/google-calendar";
 import { scheduleTaskReminder } from "@/lib/notifications";
 import { useSubscription } from "@/contexts/SubscriptionContext";
-import { trackTaskCreated, trackTaskScheduled, updateFunnel } from "@/lib/analytics";
+import { trackTaskCreated, trackTaskScheduled, updateFunnel, trackTourAIScheduled } from "@/lib/analytics";
 import { useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
 import TourTooltip from "@/components/TourTooltip";
@@ -63,7 +62,7 @@ const PRIORITY_OPTIONS = [
 
 
 export default function AddTaskScreen() {
-  const { canUseAI, aiUsage, isPro, features, refreshAIUsage } = useSubscription();
+  const { isPro, features, refreshAIUsage } = useSubscription();
   const appColors = useAppColors();
   const params = useLocalSearchParams<{
     title?: string;
@@ -74,8 +73,7 @@ export default function AddTaskScreen() {
     schedulingMethod?: string;
   }>();
 
-  const isAtWeeklyLimit = aiUsage && !aiUsage.isUnlimited && aiUsage.used >= aiUsage.limit;
-  const canUseSmartScheduling = canUseAI && !isAtWeeklyLimit;
+  const canUseSmartScheduling = isPro;
 
   const [title, setTitle] = useState(params.title || "");
   const [description, setDescription] = useState("");
@@ -117,29 +115,41 @@ export default function AddTaskScreen() {
   }, []);
 
   // Guided tour
-  const { tourStep, advanceTour, skipTour } = useGuidedTour();
-  const isManualTourMode = params.tourMode === "manual";
+  const { tourStep, advanceTour, skipTour: _skipTour, isManualTour: isManualTourMode } = useGuidedTour();
+  const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
   // Dismiss create-task tooltip so user taps the actual button themselves
   const [createTooltipDismissed, setCreateTooltipDismissed] = useState(false);
+  const [aiModeTooltipDismissed, setAiModeTooltipDismissed] = useState(false);
+  const [expandedField, setExpandedField] = useState<string | null>(null);
+  const toggleField = (field: string) => {
+    if (expandedField === field) Keyboard.dismiss();
+    setExpandedField(prev => prev === field ? null : field);
+  };
 
-  // Reset form state when entering manual tour phase (avoids stale state from previous task)
+  // Reset form every time screen is focused — prevents stale state from previous task
   useFocusEffect(
     useCallback(() => {
-      if (params.tourMode === "manual") {
-        setTitle("");
-        setDuration("60");
-        setPriority("medium");
-        setSchedulingMethod("MANUAL");
-        setDueDate(null);
-        setDescription("");
-        setTags([]);
-        setTagInput("");
-        setError(null);
-        setCreatedTask(null);
-        setShowSchedulingModal(false);
-        setCreateTooltipDismissed(false);
-      }
-    }, [params.tourMode])
+      const method = (params.schedulingMethod === "SMART" ? "SMART" : "MANUAL") as "SMART" | "MANUAL";
+      setTitle(params.title || "");
+      setDescription("");
+      setDuration(params.duration || "60");
+      setCustomDuration("");
+      setPriority((params.priority as "low" | "medium" | "high") || "medium");
+      setSchedulingMethod(method);
+      setDueDate(method === "SMART" ? (params.dueDate ? new Date(params.dueDate) : endOfDay(addDays(new Date(), 1))) : null);
+      setTags([]);
+      setTagInput("");
+      setError(null);
+      setCreatedTask(null);
+      setShowSchedulingModal(false);
+      setCreateTooltipDismissed(false);
+      setAiModeTooltipDismissed(false);
+      setBusySlots([]);
+      setSchedulingSlots([]);
+      setSchedulingError(null);
+      // Scroll back to top
+      setTimeout(() => scrollViewRef.current?.scrollTo({ y: 0, animated: false }), 50);
+    }, [params.title, params.duration, params.priority, params.schedulingMethod, params.dueDate])
   );
 
 
@@ -156,18 +166,6 @@ export default function AddTaskScreen() {
   const [existingTags, setExistingTags] = useState<string[]>([]);
   const [showTagSuggestions, setShowTagSuggestions] = useState(false);
 
-  // Recurrence state
-  const [isRecurring, setIsRecurring] = useState(false);
-  const [recurrenceFrequency, setRecurrenceFrequency] = useState<"daily" | "weekly" | "monthly">("weekly");
-  const [recurrenceDays, setRecurrenceDays] = useState<number[]>([1, 3, 5]);
-
-  const toggleRecurrenceDay = (day: number) => {
-    if (recurrenceDays.includes(day)) {
-      setRecurrenceDays(recurrenceDays.filter((d) => d !== day));
-    } else {
-      setRecurrenceDays([...recurrenceDays, day].sort());
-    }
-  };
 
   const dayLabels = [
     { day: 1, label: "M" },
@@ -260,26 +258,6 @@ export default function AddTaskScreen() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      // Enforce recurring task limit for free users
-      if (isRecurring && !isPro && features.recurring_tasks !== -1) {
-        const { count } = await supabase
-          .from("tasks")
-          .select("id", { count: "exact", head: true })
-          .eq("user_id", user.id)
-          .eq("is_recurring", true);
-
-        if ((count ?? 0) >= features.recurring_tasks) {
-          setError(`Free plan allows up to ${features.recurring_tasks} recurring tasks. Upgrade to Pro for unlimited.`);
-          return;
-        }
-      }
-
-      const recurrenceRule: RecurrenceRule | null = isRecurring
-        ? {
-            frequency: recurrenceFrequency,
-            ...(recurrenceFrequency === "weekly" && { days: recurrenceDays }),
-          }
-        : null;
 
       const { data: insertedTask, error: insertError } = await supabase
         .from("tasks")
@@ -295,8 +273,6 @@ export default function AddTaskScreen() {
             : endOfDay(addDays(new Date(), 30)).toISOString(),
           status: "pending_schedule",
           tags: tags.length > 0 ? tags : [],
-          is_recurring: isRecurring,
-          recurrence_rule: recurrenceRule,
         })
         .select()
         .single();
@@ -310,13 +286,15 @@ export default function AddTaskScreen() {
       setCreatedTask(insertedTask as Task);
       setSchedulingSlots([]);
       setSchedulingError(null);
-      setShowSchedulingModal(true);
 
-      // Load slots based on pre-selected method
+      // For MANUAL: load busy slots first so modal opens with data ready (no spinner)
+      // For SMART: open modal immediately then fetch AI slots (spinner is expected)
       if (schedulingMethod === "SMART") {
+        setShowSchedulingModal(true);
         runSmartScheduling(insertedTask as Task, user.id);
       } else {
-        loadBusySlots(user.id);
+        await loadBusySlots(user.id);
+        setShowSchedulingModal(true);
       }
 
       // Advance tour when scheduling modal opens
@@ -324,8 +302,6 @@ export default function AddTaskScreen() {
         await advanceTour(schedulingMethod === "MANUAL" || isManualTourMode
           ? "tour_manual_schedule"
           : "tour_scheduling_ai");
-      } else if (tourStep === "tour_add_manual") {
-        await advanceTour("tour_manual_schedule");
       }
     } catch (err) {
       console.error("[AddTask] Error:", err);
@@ -386,8 +362,6 @@ export default function AddTaskScreen() {
 
   const loadBusySlots = async (userId: string) => {
     try {
-      setSchedulingLoading(true);
-
       const { data: tasks } = await supabase
         .from("tasks")
         .select("title, scheduled_start, scheduled_end")
@@ -413,23 +387,30 @@ export default function AddTaskScreen() {
         busy.push({ start: e.start_time, end: e.end_time, title: e.title });
       });
 
-      setBusySlots(busy);
+      setBusySlots(busy.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()));
     } catch (err) {
       console.error("[AddTask] Load busy slots error:", err);
-    } finally {
-      setSchedulingLoading(false);
     }
   };
 
   const handleSelectSlot = async (slot: TimeSlot) => {
     if (!createdTask) return;
 
+    // Close modal immediately — no spinner for what's just a DB update
+    setShowSchedulingModal(false);
+
+    // Advance tour before navigating back so home.tsx sees the new step
+    if (tourStep === "tour_scheduling_ai") {
+      await advanceTour("tour_ai_reward");
+      trackTourAIScheduled().catch(() => {});
+    } else if (tourStep === "tour_manual_schedule" || isManualTourMode) {
+      await advanceTour("tour_manual_done");
+    }
+
+    router.back();
+
+    // Save in background
     try {
-      setSchedulingLoading(true);
-
-      let googleEventId: string | null = null;
-
-      // Use safe calendar function - won't block task scheduling if calendar fails
       const calendarResult = await safeCreateCalendarEvent(
         createdTask.title,
         createdTask.description,
@@ -437,19 +418,11 @@ export default function AddTaskScreen() {
         slot.end
       );
 
-      if (calendarResult.success && calendarResult.eventId) {
-        googleEventId = calendarResult.eventId;
-      } else if (calendarResult.error && calendarResult.needsRetry) {
-        // Calendar sync failed but will be retried later
-        console.log("[AddTask] Calendar sync pending, task will still be scheduled");
-      }
-
       const updateData: Record<string, unknown> = {
         scheduled_start: slot.start,
         scheduled_end: slot.end,
         status: "scheduled",
         ...(schedulingMethod === "MANUAL" && {
-          // Use local date components to avoid UTC offset shifting the day
           due_date: (() => {
             const d = new Date(slot.start);
             return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).toISOString();
@@ -457,8 +430,8 @@ export default function AddTaskScreen() {
         }),
       };
 
-      if (googleEventId) {
-        updateData.google_event_id = googleEventId;
+      if (calendarResult.success && calendarResult.eventId) {
+        updateData.google_event_id = calendarResult.eventId;
       }
 
       const { data: updatedTask, error: updateError } = await supabase
@@ -472,31 +445,12 @@ export default function AddTaskScreen() {
 
       if (updatedTask) {
         await scheduleTaskReminder(updatedTask as Task);
-        // Track scheduling
         await trackTaskScheduled(schedulingMethod as "SMART" | "MANUAL");
         await updateFunnel("first_schedule_at");
-
-        // Refresh AI usage after using SMART scheduling
-        if (schedulingMethod === "SMART") {
-          await refreshAIUsage();
-        }
+        if (schedulingMethod === "SMART") await refreshAIUsage();
       }
-
-      // Advance guided tour
-      if (tourStep === "tour_scheduling_ai") {
-        await advanceTour("tour_ai_reward");
-        import("@/lib/analytics").then(({ trackEvent }) => trackEvent("guided_tour_ai_scheduled").catch(() => {}));
-      } else if (tourStep === "tour_manual_schedule" || isManualTourMode) {
-        await advanceTour("tour_manual_done");
-      }
-
-      setShowSchedulingModal(false);
-      router.back();
     } catch (err) {
       console.error("[AddTask] Update error:", err);
-      setSchedulingError(err instanceof Error ? err.message : "Failed to schedule task");
-    } finally {
-      setSchedulingLoading(false);
     }
   };
 
@@ -509,7 +463,7 @@ export default function AddTaskScreen() {
     setShowDatePicker(Platform.OS === "ios");
     if (selectedDate) {
       setDueDate(endOfDay(selectedDate));
-      if (tourStep === "tour_task_priority") advanceTour("tour_task_due");
+      if (tourStep === "tour_task_priority") advanceTour(isManualTourMode ? "tour_task_tag" : "tour_task_due");
       else if (tourStep === "tour_task_due") advanceTour("tour_task_tag");
     }
   };
@@ -532,13 +486,13 @@ export default function AddTaskScreen() {
         style={styles.keyboardView}
       >
         {/* Header */}
-        <Animated.View style={[styles.header, { opacity: fadeAnim, backgroundColor: appColors.surface, borderBottomColor: appColors.border }]}>
-            <Pressable onPress={() => router.back()} style={styles.backButton}>
-              <MaterialCommunityIcons name="arrow-left" size={24} color={appColors.textPrimary} />
-            </Pressable>
-            <Text style={[styles.headerTitle, { color: appColors.textPrimary }]}>New Task</Text>
-            <View style={styles.headerSpacer} />
-          </Animated.View>
+        <Animated.View style={[styles.header, { opacity: fadeAnim, backgroundColor: appColors.background }]}>
+          <Pressable onPress={() => router.back()} style={styles.backButton}>
+            <MaterialCommunityIcons name="arrow-left" size={24} color={appColors.textPrimary} />
+          </Pressable>
+          <Text style={[styles.headerTitle, { color: appColors.textPrimary }]}>New Task</Text>
+          <View style={styles.headerSpacer} />
+        </Animated.View>
 
         <ScrollView
           ref={scrollViewRef}
@@ -547,378 +501,395 @@ export default function AddTaskScreen() {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Main Input - Hero Style */}
-          <View style={[styles.heroSection, { backgroundColor: appColors.surface }]}>
+          {/* ── Title ── */}
+          <View style={styles.titleArea}>
             <TextInput
               placeholder="What needs to be done?"
               value={title}
               onChangeText={setTitle}
-              onBlur={() => { if (title.trim() && tourStep === "tour_task_title") advanceTour("tour_task_duration"); }}
-              style={[styles.heroInput, { color: appColors.textPrimary }]}
+              onBlur={() => {}}
+              style={[styles.titleInput, { color: appColors.textPrimary, backgroundColor: "transparent" }]}
               mode="flat"
               underlineColor="transparent"
               activeUnderlineColor="transparent"
               placeholderTextColor={appColors.textTertiary}
               cursorColor={appColors.gradientStart}
               selectionColor={`${appColors.gradientStart}40`}
+              multiline
               theme={{ colors: { primary: appColors.gradientStart, onSurfaceVariant: appColors.textTertiary } }}
             />
           </View>
 
-          {/* Scheduling Method Toggle */}
-          <View style={[styles.methodToggleContainer, { backgroundColor: appColors.surface }]}>
-            <View style={[styles.methodToggle, { backgroundColor: appColors.inputBg }]}>
+          <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+          {/* ── Schedule row ── */}
+          <View style={styles.attrRow}>
+            <View style={styles.attrRowLeft}>
+              <MaterialCommunityIcons
+                name={schedulingMethod === "SMART" ? "star-four-points" : "clock-outline"}
+                size={17}
+                color={schedulingMethod === "SMART" ? (appColors.aiPurple ?? appColors.secondary) : appColors.primary}
+              />
+              <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Schedule</Text>
+            </View>
+            <View style={styles.schedulePills}>
               <Pressable
-                style={[
-                  styles.methodOption,
-                  schedulingMethod === "MANUAL" && { backgroundColor: appColors.primaryLight },
-                ]}
+                style={[styles.schedulePill, { backgroundColor: schedulingMethod === "MANUAL" ? appColors.primaryLight : appColors.inputBg }]}
                 onPress={() => setSchedulingMethod("MANUAL")}
               >
-                <MaterialCommunityIcons
-                  name="clock-outline"
-                  size={16}
-                  color={schedulingMethod === "MANUAL" ? appColors.primary : appColors.textTertiary}
-                />
-                <Text style={[
-                  styles.methodOptionText,
-                  { color: schedulingMethod === "MANUAL" ? appColors.primary : appColors.textSecondary },
-                  schedulingMethod === "MANUAL" && { fontWeight: "700" },
-                ]}>Pick a time</Text>
+                <Text style={[styles.schedulePillText, { color: schedulingMethod === "MANUAL" ? appColors.primary : appColors.textTertiary, fontWeight: schedulingMethod === "MANUAL" ? "700" : "500" }]}>
+                  Pick time
+                </Text>
               </Pressable>
-
-              <View style={[styles.methodDivider, { backgroundColor: appColors.border }]} />
-
               <Pressable
-                style={[
-                  styles.methodOption,
-                  schedulingMethod === "SMART" && canUseSmartScheduling && { backgroundColor: appColors.aiPurpleLight },
-                  !canUseSmartScheduling && { opacity: 0.6 },
-                ]}
+                style={[styles.schedulePill, { backgroundColor: schedulingMethod === "SMART" && canUseSmartScheduling ? (appColors.aiPurpleLight ?? appColors.secondaryLight) : appColors.inputBg, opacity: !canUseSmartScheduling ? 0.6 : 1 }]}
                 onPress={() => {
                   if (canUseSmartScheduling) {
                     setSchedulingMethod("SMART");
                     if (!dueDate) setDueDate(endOfDay(addDays(new Date(), 1)));
+                    if (tourStep === "tour_task_title" && !isManualTourMode) advanceTour("tour_task_due");
                   } else {
-                    router.push("/paywall");
+                    router.push({ pathname: "/paywall", params: { source: "smart_scheduling" } });
                   }
                 }}
               >
                 <MaterialCommunityIcons
                   name="star-four-points"
-                  size={16}
-                  color={schedulingMethod === "SMART" && canUseSmartScheduling ? appColors.aiPurple : appColors.textTertiary}
+                  size={12}
+                  color={schedulingMethod === "SMART" && canUseSmartScheduling ? (appColors.aiPurple ?? appColors.secondary) : appColors.textTertiary}
                 />
-                <Text style={[
-                  styles.methodOptionText,
-                  { color: schedulingMethod === "SMART" && canUseSmartScheduling ? appColors.aiPurple : appColors.textSecondary },
-                  schedulingMethod === "SMART" && canUseSmartScheduling && { fontWeight: "700" },
-                ]}>AI Schedule</Text>
-                {!canUseSmartScheduling && (
-                  <MaterialCommunityIcons name="lock" size={12} color={appColors.textTertiary} />
-                )}
+                <Text style={[styles.schedulePillText, { color: schedulingMethod === "SMART" && canUseSmartScheduling ? (appColors.aiPurple ?? appColors.secondary) : appColors.textTertiary, fontWeight: schedulingMethod === "SMART" && canUseSmartScheduling ? "700" : "500" }]}>
+                  AI
+                </Text>
+                {!canUseSmartScheduling && <MaterialCommunityIcons name="lock" size={10} color={appColors.textTertiary} />}
               </Pressable>
             </View>
           </View>
 
-          {/* Form sections */}
-          <>
-              {/* Duration Selection */}
-              <View style={[styles.section, { backgroundColor: appColors.surface }]}>
-                <Text style={[styles.sectionLabel, { color: appColors.textSecondary }]}>Duration</Text>
-                <View style={styles.durationGrid}>
-                  {DURATION_PRESETS.map((preset) => {
-                    const isActive = duration === preset.value && !customDuration;
-                    return (
-                      <Pressable
-                        key={preset.value}
-                        style={[
-                          styles.durationChip,
-                          { backgroundColor: appColors.inputBg },
-                          isActive && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary },
-                        ]}
-                        onPress={() => {
-                          setDuration(preset.value);
-                          setCustomDuration("");
-                          if (tourStep === "tour_task_duration") advanceTour("tour_task_priority");
-                        }}
-                      >
-                        <Text
-                          style={[
-                            styles.durationChipText,
-                            { color: appColors.textTertiary },
-                            isActive && { color: appColors.primary },
-                          ]}
-                        >
-                          {preset.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
+          <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+          {/* ── Deadline row (SMART only) ── */}
+          {schedulingMethod === "SMART" && (
+            <>
+              <Pressable style={styles.attrRow} onPress={() => toggleField("deadline")}>
+                <View style={styles.attrRowLeft}>
+                  <MaterialCommunityIcons
+                    name="calendar-clock"
+                    size={17}
+                    color={dueDate ? appColors.gradientStart : appColors.textTertiary}
+                  />
+                  <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Deadline</Text>
                 </View>
-                <View style={styles.customDurationRow}>
-                  <TextInput
-                    placeholder="Custom duration"
-                    value={customDuration}
-                    onChangeText={setCustomDuration}
-                    style={[styles.customDurationInput, { backgroundColor: appColors.surface }]}
-                    mode="outlined"
-                    keyboardType="numeric"
-                    outlineColor={appColors.border}
-                    activeOutlineColor={appColors.gradientStart}
-                    textColor={appColors.textPrimary}
-                    placeholderTextColor={appColors.textTertiary}
-                    right={<TextInput.Affix text="min" textStyle={[styles.durationAffix, { color: appColors.textTertiary }]} />}
-                    dense
-                    theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+                <View style={styles.attrRowRight}>
+                  <Text style={[styles.attrRowValue, { color: dueDate ? appColors.gradientStart : appColors.textTertiary }]}>
+                    {dueDate
+                      ? (isDueDateSelected(quickDueDates[0].date) ? "Today"
+                        : isDueDateSelected(quickDueDates[1].date) ? "Tomorrow"
+                        : isDueDateSelected(quickDueDates[2].date) ? "Next Week"
+                        : format(dueDate, "EEE, MMM d"))
+                      : "Set date"}
+                  </Text>
+                  <MaterialCommunityIcons
+                    name={expandedField === "deadline" ? "chevron-up" : "chevron-right"}
+                    size={16}
+                    color={appColors.textTertiary}
                   />
                 </View>
-              </View>
-
-              {/* Priority Selection */}
-              <View style={[styles.section, { backgroundColor: appColors.surface }]}>
-                <Text style={[styles.sectionLabel, { color: appColors.textSecondary }]}>Priority</Text>
-                <View style={styles.priorityRow}>
-                  {PRIORITY_OPTIONS.map((option) => {
-                    const dynamicColor =
-                      option.value === "high" ? appColors.priorityHigh
-                      : option.value === "medium" ? appColors.priorityMedium
-                      : appColors.priorityLow;
-                    const isActive = priority === option.value;
-                    return (
-                      <Pressable
-                        key={option.value}
-                        style={[
-                          styles.priorityCard,
-                          { backgroundColor: appColors.inputBg },
-                          isActive && { borderColor: dynamicColor, backgroundColor: `${dynamicColor}10` },
-                        ]}
-                        onPress={() => {
-                          setPriority(option.value);
-                          if (tourStep === "tour_task_priority") advanceTour("tour_task_due");
-                        }}
-                      >
-                        <MaterialCommunityIcons
-                          name={option.icon as any}
-                          size={18}
-                          color={isActive ? dynamicColor : appColors.textTertiary}
-                        />
-                        <Text
-                          style={[
-                            styles.priorityCardText,
-                            { color: appColors.textTertiary },
-                            isActive && { color: dynamicColor },
-                          ]}
+              </Pressable>
+              {expandedField === "deadline" && (
+                <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+                  <View style={styles.dueDateRow}>
+                    {quickDueDates.map((item) => {
+                      const isSelected = isDueDateSelected(item.date);
+                      return (
+                        <Pressable
+                          key={item.label}
+                          style={[styles.dueDateChip, { backgroundColor: appColors.background }, isSelected && { backgroundColor: appColors.gradientStart }]}
+                          onPress={() => {
+                            setDueDate(item.date);
+                            setExpandedField(null);
+                            if (tourStep === "tour_task_due") advanceTour("tour_task_tag");
+                            else if (tourStep === "tour_task_priority") advanceTour("tour_task_due");
+                          }}
                         >
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
+                          <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, isSelected && { color: "#FFFFFF" }]}>
+                            {item.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                    <Pressable style={[styles.dueDateChip, { backgroundColor: appColors.background }]} onPress={() => setShowDatePicker(true)}>
+                      <MaterialCommunityIcons name="calendar" size={16} color={appColors.textTertiary} />
+                    </Pressable>
+                  </View>
+                  {showDatePicker && (
+                    <DateTimePicker value={dueDate || new Date()} mode="date" minimumDate={new Date()} onChange={handleDateChange} />
+                  )}
                 </View>
+              )}
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+            </>
+          )}
+
+          {/* ── Duration row ── */}
+          <Pressable style={styles.attrRow} onPress={() => toggleField("duration")}>
+            <View style={styles.attrRowLeft}>
+              <MaterialCommunityIcons name="timer-outline" size={17} color={appColors.textTertiary} />
+              <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Duration</Text>
+            </View>
+            <View style={styles.attrRowRight}>
+              <Text style={[styles.attrRowValue, { color: appColors.textSecondary }]}>
+                {customDuration
+                  ? `${customDuration}m`
+                  : duration === "60" ? "1h"
+                  : duration === "120" ? "2h"
+                  : `${duration}m`}
+              </Text>
+              <MaterialCommunityIcons
+                name={expandedField === "duration" ? "chevron-up" : "chevron-right"}
+                size={16}
+                color={appColors.textTertiary}
+              />
+            </View>
+          </Pressable>
+          {expandedField === "duration" && (
+            <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+              <View style={styles.durationGrid}>
+                {DURATION_PRESETS.map((preset) => {
+                  const isActive = duration === preset.value && !customDuration;
+                  return (
+                    <Pressable
+                      key={preset.value}
+                      style={[styles.durationChip, { backgroundColor: appColors.background }, isActive && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary }]}
+                      onPress={() => { setDuration(preset.value); setCustomDuration(""); setExpandedField(null); }}
+                    >
+                      <Text style={[styles.durationChipText, { color: appColors.textTertiary }, isActive && { color: appColors.primary }]}>
+                        {preset.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
               </View>
-
-              {/* Due Date — only shown for SMART scheduling */}
-              {schedulingMethod === "SMART" && <View style={[styles.section, { backgroundColor: appColors.surface }]}>
-                <Text style={[styles.sectionLabel, { color: appColors.textSecondary }]}>Due date</Text>
-                <View style={styles.dueDateRow}>
-                  {quickDueDates.map((item) => {
-                    const isSelected = isDueDateSelected(item.date);
-                    return (
-                      <Pressable
-                        key={item.label}
-                        style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }, isSelected && { backgroundColor: appColors.gradientStart }]}
-                        onPress={() => { setDueDate(item.date); if (tourStep === "tour_task_priority" || tourStep === "tour_task_due") advanceTour("tour_task_due"); }}
-                      >
-                        <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, isSelected && { color: "#FFFFFF" }]}>
-                          {item.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                  <Pressable style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }]} onPress={() => setShowDatePicker(true)}>
-                    <MaterialCommunityIcons name="calendar" size={16} color={appColors.textTertiary} />
-                  </Pressable>
-                </View>
-                {dueDate && !quickDueDates.some((d) => isDueDateSelected(d.date)) && (
-                  <Text style={[styles.selectedDateText, { color: appColors.primary }]}>Due: {format(dueDate, "EEE, MMM d")}</Text>
-                )}
-                {showDatePicker && (
-                  <DateTimePicker
-                    value={dueDate || new Date()}
-                    mode="date"
-                    minimumDate={new Date()}
-                    onChange={handleDateChange}
-                  />
-                )}
-              </View>}
-
-              {/* Notes */}
-              <View style={[styles.section, { backgroundColor: appColors.surface }]}>
-                <Text style={[styles.sectionLabel, { color: appColors.textSecondary }]}>Notes (optional)</Text>
+              <View style={styles.customDurationRow}>
                 <TextInput
-                  placeholder="Add notes..."
-                  value={description}
-                  onChangeText={setDescription}
-                  style={[styles.notesInput, { backgroundColor: appColors.surface }]}
+                  placeholder="Custom (mins)"
+                  value={customDuration}
+                  onChangeText={setCustomDuration}
+                  style={[styles.customDurationInput, { backgroundColor: appColors.background }]}
                   mode="outlined"
-                  multiline
-                  numberOfLines={3}
+                  keyboardType="numeric"
                   outlineColor={appColors.border}
                   activeOutlineColor={appColors.gradientStart}
-                  cursorColor={appColors.gradientStart}
                   textColor={appColors.textPrimary}
                   placeholderTextColor={appColors.textTertiary}
-                  contentStyle={styles.notesInputContent}
+                  right={<TextInput.Affix text="min" textStyle={[styles.durationAffix, { color: appColors.textTertiary }]} />}
+                  dense
                   theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
                 />
               </View>
+            </View>
+          )}
 
-              {/* Tags */}
-              <View style={[styles.section, { backgroundColor: appColors.surface }]}>
-                <Text style={[styles.sectionLabel, { color: appColors.textSecondary }]}>Tags</Text>
-                <View style={styles.tagsSection}>
-                  {tags.length > 0 && (
-                    <View style={styles.tagChips}>
-                      {tags.map((tag) => (
-                        <View key={tag} style={[styles.tagChip, { backgroundColor: appColors.secondaryLight }]}>
-                          <Text style={[styles.tagChipText, { color: appColors.secondary }]}>{tag}</Text>
-                          <Pressable onPress={() => removeTag(tag)} hitSlop={8}>
-                            <MaterialCommunityIcons name="close" size={14} color={appColors.secondary} />
-                          </Pressable>
-                        </View>
-                      ))}
-                    </View>
-                  )}
+          <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
 
-                  <View style={[styles.tagInputRow, { backgroundColor: appColors.inputBg }]}>
-                    <MaterialCommunityIcons name="tag-plus" size={20} color={tagInput ? appColors.gradientStart : appColors.textTertiary} />
-                    <TextInput
-                      placeholder={tags.length > 0 ? "Add another tag..." : "Add tags (e.g., work, personal)..."}
-                      value={tagInput}
-                      onChangeText={(text) => {
-                        setTagInput(text);
-                        setShowTagSuggestions(true);
-                      }}
-                      onFocus={() => {
-                        setShowTagSuggestions(true);
-                        scrollToBottom();
-                      }}
-                      onBlur={() => setTimeout(() => setShowTagSuggestions(false), 150)}
-                      onSubmitEditing={() => {
-                        if (tagInput.trim()) addTag(tagInput);
-                      }}
-                      style={[styles.tagInput, { color: appColors.textPrimary }]}
-                      mode="flat"
-                      underlineColor="transparent"
-                      activeUnderlineColor="transparent"
-                      cursorColor={appColors.gradientStart}
-                      placeholderTextColor={appColors.textTertiary}
-                      dense
-                      theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
-                    />
-                    {tagInput.trim() && (
-                      <Pressable onPress={() => addTag(tagInput)} style={styles.addTagButton}>
-                        <View style={[styles.addTagButtonInner, { backgroundColor: appColors.gradientStart }]}>
-                          <MaterialCommunityIcons name="plus" size={16} color="#FFFFFF" />
-                        </View>
-                      </Pressable>
-                    )}
-                  </View>
-
-                  {showTagSuggestions && (
-                    <View style={styles.tagSuggestionsContainer}>
-                      {filteredSuggestions.length > 0 ? (
-                        <>
-                          <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Existing tags:</Text>
-                          <View style={styles.tagSuggestions}>
-                            {filteredSuggestions.slice(0, 6).map((tag) => (
-                              <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.inputBg, borderColor: appColors.border }]} onPress={() => addTag(tag)}>
-                                <MaterialCommunityIcons name="tag" size={12} color={appColors.textTertiary} />
-                                <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
-                              </Pressable>
-                            ))}
-                          </View>
-                        </>
-                      ) : tagInput.trim() ? (
-                        <Text style={[styles.tagHint, { color: appColors.textTertiary }]}>Press enter or tap + to create "{tagInput.trim()}"</Text>
-                      ) : existingTags.length > 0 ? (
-                        <>
-                          <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Quick add:</Text>
-                          <View style={styles.tagSuggestions}>
-                            {existingTags.filter(t => !tags.includes(t)).slice(0, 6).map((tag) => (
-                              <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.inputBg, borderColor: appColors.border }]} onPress={() => addTag(tag)}>
-                                <MaterialCommunityIcons name="tag" size={12} color={appColors.textTertiary} />
-                                <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
-                              </Pressable>
-                            ))}
-                          </View>
-                        </>
-                      ) : null}
-                    </View>
-                  )}
-                </View>
+          {/* ── Priority row ── */}
+          <Pressable style={styles.attrRow} onPress={() => toggleField("priority")}>
+            <View style={styles.attrRowLeft}>
+              <MaterialCommunityIcons
+                name={priority === "low" ? "flag-outline" : "flag"}
+                size={17}
+                color={priority === "high" ? appColors.priorityHigh : priority === "medium" ? appColors.priorityMedium : appColors.textTertiary}
+              />
+              <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Priority</Text>
+            </View>
+            <View style={styles.attrRowRight}>
+              <Text style={[styles.attrRowValue, {
+                color: priority === "high" ? appColors.priorityHigh
+                  : priority === "medium" ? appColors.priorityMedium
+                  : appColors.textTertiary,
+              }]}>
+                {priority === "high" ? "High" : priority === "medium" ? "Medium" : "Low"}
+              </Text>
+              <MaterialCommunityIcons
+                name={expandedField === "priority" ? "chevron-up" : "chevron-right"}
+                size={16}
+                color={appColors.textTertiary}
+              />
+            </View>
+          </Pressable>
+          {expandedField === "priority" && (
+            <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+              <View style={styles.priorityRow}>
+                {PRIORITY_OPTIONS.map((option) => {
+                  const dynamicColor = option.value === "high" ? appColors.priorityHigh
+                    : option.value === "medium" ? appColors.priorityMedium
+                    : appColors.priorityLow;
+                  const isActive = priority === option.value;
+                  return (
+                    <Pressable
+                      key={option.value}
+                      style={[styles.priorityCard, { backgroundColor: appColors.background }, isActive && { borderColor: dynamicColor, backgroundColor: `${dynamicColor}10` }]}
+                      onPress={() => { setPriority(option.value); setExpandedField(null); }}
+                    >
+                      <MaterialCommunityIcons name={option.icon as any} size={18} color={isActive ? dynamicColor : appColors.textTertiary} />
+                      <Text style={[styles.priorityCardText, { color: appColors.textTertiary }, isActive && { color: dynamicColor }]}>
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
               </View>
+            </View>
+          )}
 
-              {/* Repeat */}
-              <View style={[styles.section, { backgroundColor: appColors.surface }]}>
-                <Pressable
-                  style={styles.repeatToggle}
-                  onPress={() => setIsRecurring(!isRecurring)}
-                >
-                  <View style={styles.repeatToggleLeft}>
-                    <MaterialCommunityIcons
-                      name="repeat"
-                      size={20}
-                      color={isRecurring ? appColors.secondary : appColors.textTertiary}
-                    />
-                    <Text style={[styles.repeatToggleText, { color: appColors.textSecondary }, isRecurring && { color: appColors.secondary, fontWeight: "500" }]}>
-                      Repeat this task
-                    </Text>
-                  </View>
-                  <View style={[styles.toggleSwitch, { backgroundColor: appColors.border }, isRecurring && { backgroundColor: appColors.secondary }]}>
-                    <View style={[styles.toggleKnob, isRecurring && styles.toggleKnobActive]} />
-                  </View>
-                </Pressable>
+          <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
 
-                {isRecurring && (
-                  <View style={styles.repeatOptions}>
-                    <View style={styles.frequencyRow}>
-                      {(["daily", "weekly", "monthly"] as const).map((freq) => (
-                        <Pressable
-                          key={freq}
-                          style={[styles.frequencyChip, { backgroundColor: appColors.inputBg }, recurrenceFrequency === freq && { backgroundColor: appColors.secondaryLight }]}
-                          onPress={() => setRecurrenceFrequency(freq)}
-                        >
-                          <Text style={[styles.frequencyChipText, { color: appColors.textTertiary }, recurrenceFrequency === freq && { color: appColors.secondary }]}>
-                            {freq.charAt(0).toUpperCase() + freq.slice(1)}
-                          </Text>
-                        </Pressable>
-                      ))}
+          {/* ── Notes row ── */}
+          <Pressable style={styles.attrRow} onPress={() => toggleField("notes")}>
+            <View style={styles.attrRowLeft}>
+              <MaterialCommunityIcons
+                name="text-box-outline"
+                size={17}
+                color={description ? appColors.textSecondary : appColors.textTertiary}
+              />
+              <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Notes</Text>
+            </View>
+            <View style={styles.attrRowRight}>
+              <Text style={[styles.attrRowValue, { color: appColors.textTertiary }]} numberOfLines={1}>
+                {description || "Optional"}
+              </Text>
+              <MaterialCommunityIcons
+                name={expandedField === "notes" ? "chevron-up" : "chevron-right"}
+                size={16}
+                color={appColors.textTertiary}
+              />
+            </View>
+          </Pressable>
+          {expandedField === "notes" && (
+            <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+              <TextInput
+                placeholder="Add notes..."
+                value={description}
+                onChangeText={setDescription}
+                style={[styles.notesInput, { backgroundColor: appColors.background }]}
+                mode="outlined"
+                multiline
+                numberOfLines={3}
+                outlineColor={appColors.border}
+                activeOutlineColor={appColors.gradientStart}
+                cursorColor={appColors.gradientStart}
+                textColor={appColors.textPrimary}
+                placeholderTextColor={appColors.textTertiary}
+                contentStyle={styles.notesInputContent}
+                theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+              />
+            </View>
+          )}
+
+          <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+          {/* ── Tags row ── */}
+          <Pressable
+            style={styles.attrRow}
+            onPress={() => {
+              toggleField("tags");
+              if (expandedField !== "tags") scrollToBottom();
+            }}
+          >
+            <View style={styles.attrRowLeft}>
+              <MaterialCommunityIcons
+                name="tag-outline"
+                size={17}
+                color={tags.length > 0 ? appColors.secondary : appColors.textTertiary}
+              />
+              <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Tags</Text>
+            </View>
+            <View style={styles.attrRowRight}>
+              <Text style={[styles.attrRowValue, { color: appColors.textTertiary }]} numberOfLines={1}>
+                {tags.length > 0 ? tags.join(", ") : "Optional"}
+              </Text>
+              <MaterialCommunityIcons
+                name={expandedField === "tags" ? "chevron-up" : "chevron-right"}
+                size={16}
+                color={appColors.textTertiary}
+              />
+            </View>
+          </Pressable>
+          {expandedField === "tags" && (
+            <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+              {tags.length > 0 && (
+                <View style={styles.tagChips}>
+                  {tags.map((tag) => (
+                    <View key={tag} style={[styles.tagChip, { backgroundColor: appColors.secondaryLight }]}>
+                      <Text style={[styles.tagChipText, { color: appColors.secondary }]}>{tag}</Text>
+                      <Pressable onPress={() => removeTag(tag)} hitSlop={8}>
+                        <MaterialCommunityIcons name="close" size={14} color={appColors.secondary} />
+                      </Pressable>
                     </View>
-
-                    {recurrenceFrequency === "weekly" && (
-                      <View style={styles.daySelector}>
-                        {dayLabels.map(({ day, label }) => {
-                          const isDayActive = recurrenceDays.includes(day);
-                          return (
-                            <Pressable
-                              key={day}
-                              style={[styles.dayButton, { backgroundColor: appColors.inputBg }, isDayActive && { backgroundColor: appColors.secondary }]}
-                              onPress={() => toggleRecurrenceDay(day)}
-                            >
-                              <Text style={[styles.dayButtonText, { color: appColors.textTertiary }, isDayActive && { color: "#FFFFFF" }]}>
-                                {label}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-                    )}
-                  </View>
+                  ))}
+                </View>
+              )}
+              <View style={[styles.tagInputRow, { backgroundColor: appColors.background }]}>
+                <MaterialCommunityIcons name="tag-plus" size={20} color={tagInput ? appColors.gradientStart : appColors.textTertiary} />
+                <TextInput
+                  placeholder={tags.length > 0 ? "Add another tag..." : "Add tags (e.g., work, personal)..."}
+                  value={tagInput}
+                  onChangeText={(text) => { setTagInput(text); setShowTagSuggestions(true); }}
+                  onFocus={() => { setShowTagSuggestions(true); scrollToBottom(); }}
+                  onBlur={() => setTimeout(() => setShowTagSuggestions(false), 150)}
+                  onSubmitEditing={() => { if (tagInput.trim()) addTag(tagInput); }}
+                  style={[styles.tagInput, { color: appColors.textPrimary }]}
+                  mode="flat"
+                  underlineColor="transparent"
+                  activeUnderlineColor="transparent"
+                  cursorColor={appColors.gradientStart}
+                  placeholderTextColor={appColors.textTertiary}
+                  dense
+                  theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+                />
+                {tagInput.trim() && (
+                  <Pressable onPress={() => addTag(tagInput)} style={styles.addTagButton}>
+                    <View style={[styles.addTagButtonInner, { backgroundColor: appColors.gradientStart }]}>
+                      <MaterialCommunityIcons name="plus" size={16} color="#FFFFFF" />
+                    </View>
+                  </Pressable>
                 )}
               </View>
-          </>
+              {showTagSuggestions && (
+                <View style={styles.tagSuggestionsContainer}>
+                  {filteredSuggestions.length > 0 ? (
+                    <>
+                      <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Existing tags:</Text>
+                      <View style={styles.tagSuggestions}>
+                        {filteredSuggestions.slice(0, 6).map((tag) => (
+                          <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.background, borderColor: appColors.border }]} onPress={() => addTag(tag)}>
+                            <MaterialCommunityIcons name="tag" size={12} color={appColors.textTertiary} />
+                            <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </>
+                  ) : tagInput.trim() ? (
+                    <Text style={[styles.tagHint, { color: appColors.textTertiary }]}>Press enter or tap + to create "{tagInput.trim()}"</Text>
+                  ) : existingTags.length > 0 ? (
+                    <>
+                      <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Quick add:</Text>
+                      <View style={styles.tagSuggestions}>
+                        {existingTags.filter(t => !tags.includes(t)).slice(0, 6).map((tag) => (
+                          <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.background, borderColor: appColors.border }]} onPress={() => addTag(tag)}>
+                            <MaterialCommunityIcons name="tag" size={12} color={appColors.textTertiary} />
+                            <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </>
+                  ) : null}
+                </View>
+              )}
+            </View>
+          )}
+
+          <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
 
           {/* Error */}
           {error && (
@@ -928,79 +899,88 @@ export default function AddTaskScreen() {
             </View>
           )}
 
-          {/* Spacer */}
-          <View style={{ height: 100 }} />
         </ScrollView>
 
         {/* Bottom Action */}
-        <View style={[styles.bottomAction, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
+        <View style={[styles.bottomAction, { backgroundColor: appColors.background, borderTopColor: appColors.border }]}>
           <Pressable
             style={[styles.createButton, (!title.trim() || (schedulingMethod === "SMART" && !dueDate) || loading) && styles.createButtonDisabled]}
             onPress={handleCreateTask}
             disabled={!title.trim() || (schedulingMethod === "SMART" && !dueDate) || loading}
           >
-            <LinearGradient
-              colors={!title.trim() || (schedulingMethod === "SMART" && !dueDate) || loading ? ["#D1D5DB", "#D1D5DB"] : [appColors.gradientStart, appColors.gradientEnd]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.createButtonGradient}
-            >
+            <View style={[styles.createButtonGradient, { backgroundColor: schedulingMethod === "SMART" ? appColors.aiPurple : appColors.primary }]}>
               {loading ? (
                 <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <>
-                  <MaterialCommunityIcons name="check" size={22} color="#FFFFFF" />
-                  <Text style={styles.createButtonText}>Create Task</Text>
+                  <MaterialCommunityIcons name={schedulingMethod === "SMART" ? "star-four-points" : "check"} size={22} color="#FFFFFF" />
+                  <Text style={styles.createButtonText}>{schedulingMethod === "MANUAL" ? "Select Time" : "Schedule for me"}</Text>
                 </>
               )}
-            </LinearGradient>
+            </View>
           </Pressable>
         </View>
 
         {/* Tour Tooltips — rendered outside ScrollView, above keyboard */}
         <TourTooltip
-          visible={tourStep === "tour_task_title"}
+          visible={tourStep === "tour_task_title" && !isManualTourMode && !aiModeTooltipDismissed}
+          icon="star-four-points"
+          iconColor={appColors.aiPurple ?? appColors.secondary}
+          title="Switch to AI Schedule"
+          body="Tap 'AI Schedule' at the top. Then fill in the details and I'll search your whole day to find the perfect gap."
+          ctaLabel="Got it"
+          onCta={() => {
+            setAiModeTooltipDismissed(true);
+            if (canUseSmartScheduling) {
+              setSchedulingMethod("SMART");
+              if (!dueDate) setDueDate(endOfDay(addDays(new Date(), 1)));
+              advanceTour("tour_task_due");
+            }
+          }}
+          onSkip={skipTour}
+          showSkip
+        />
+        <TourTooltip
+          visible={tourStep === "tour_task_title" && isManualTourMode}
           icon="pencil-outline"
           iconColor={appColors.primary}
-          title={isManualTourMode ? "Name your task" : "Name your task"}
-          body={isManualTourMode ? "Give it a clear name, then fill in the details below." : "Be specific — 'Write report intro' schedules better than 'Work'. I group related tasks to avoid context-switching."}
-          ctaLabel="Got it"
-          onCta={() => advanceTour("tour_task_duration")}
-          onSkip={skipTour}
-          showSkip={!isManualTourMode}
-        />
-        <TourTooltip
-          visible={tourStep === "tour_task_duration"}
-          icon="timer-outline"
-          iconColor={appColors.primary}
-          title="How long will it take?"
-          body={isManualTourMode ? "Pick a duration so the right amount of time is blocked." : "I use this to find a gap that actually fits. I won't schedule a 2-hour task into a 45-minute window."}
-          ctaLabel="Got it"
-          onCta={() => advanceTour("tour_task_priority")}
-          onSkip={skipTour}
-          showSkip={!isManualTourMode}
-        />
-        <TourTooltip
-          visible={tourStep === "tour_task_priority"}
-          icon="flag-outline"
-          iconColor={appColors.warning}
-          title="How urgent is this?"
-          body={isManualTourMode ? "Set the priority, then choose a due date." : "High priority tasks get your peak energy hours. Low priority fills natural gaps."}
-          ctaLabel="Got it"
-          onCta={() => advanceTour("tour_task_due")}
-          onSkip={skipTour}
-          showSkip={!isManualTourMode}
-        />
-        <TourTooltip
-          visible={tourStep === "tour_task_due"}
-          icon="calendar-outline"
-          iconColor={appColors.primary}
-          title="Set a deadline"
-          body={isManualTourMode ? "Pick your due date below." : "This tells me how urgently to schedule it. Due tomorrow? I'll find a slot today."}
+          title="Fill in the basics"
+          body="Name it, pick a duration, and set priority. Then you'll choose exactly when to do it."
           ctaLabel="Got it"
           onCta={() => advanceTour("tour_task_tag")}
           onSkip={skipTour}
-          showSkip={!isManualTourMode}
+          showSkip
+        />
+        <TourTooltip
+          visible={tourStep === "tour_task_due" && !isManualTourMode}
+          icon="pencil-outline"
+          iconColor={appColors.primary}
+          title="Now fill in the rest"
+          body=""
+          pages={[
+            {
+              icon: "text-box-outline",
+              iconColor: appColors.aiPurple ?? appColors.secondary,
+              title: "Name it clearly",
+              body: "A specific label helps AI pick the right time. 'Review Q4 report' works better than 'Work task'.",
+            },
+            {
+              icon: "clock-outline",
+              iconColor: appColors.secondary,
+              title: "Duration & priority",
+              body: "How long will it take? High priority tasks get scheduled earlier in your day.",
+            },
+            {
+              icon: "calendar-clock",
+              iconColor: appColors.success,
+              title: "Deadline",
+              body: "Set it to tomorrow — gives me room to find the right slot.",
+            },
+          ]}
+          ctaLabel="Got it"
+          onCta={() => advanceTour("tour_task_tag")}
+          onSkip={skipTour}
+          showSkip
         />
         <TourTooltip
           visible={tourStep === "tour_task_tag"}
@@ -1017,21 +997,12 @@ export default function AddTaskScreen() {
           visible={tourStep === "tour_task_create_ai" && !createTooltipDismissed}
           icon="robot-outline"
           iconColor={appColors.secondary}
-          title="Ready to find your time"
-          body="Tap the Create Task button above. I'll rank the best slots for this task based on your schedule and energy patterns."
+          title={isManualTourMode ? "Ready to schedule it" : "Ready to find your time"}
+          body={isManualTourMode ? "Tap Select Time above. Next you'll pick the exact slot you want." : "I'll create the task and rank the best available slots based on your schedule and energy patterns."}
           ctaLabel="Got it"
           onCta={() => setCreateTooltipDismissed(true)}
           onSkip={skipTour}
           showSkip
-        />
-        <TourTooltip
-          visible={tourStep === "tour_add_manual"}
-          icon="gesture-tap"
-          iconColor={appColors.secondary}
-          title="Create another task"
-          body="You already know this part — fill in the details however you like. This time you'll pick your own time."
-          showSkip
-          onSkip={skipTour}
         />
       </KeyboardAvoidingView>
 
@@ -1064,10 +1035,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: COLORS.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingTop: 8,
+    paddingBottom: 12,
+    backgroundColor: COLORS.background,
   },
   backButton: {
     padding: 4,
@@ -1085,92 +1055,88 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingTop: 8,
-  },
-  tourHintBar: {
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 4,
-    borderRadius: 10,
-    borderWidth: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  tourHintText: {
-    fontSize: 13,
-    fontWeight: "500",
-    lineHeight: 18,
+    paddingTop: 0,
+    paddingBottom: 16,
   },
 
-  // Scheduling Method Toggle
-  methodToggleContainer: {
+  // Title area — large, open, no border
+  titleArea: {
     paddingHorizontal: 20,
-    paddingVertical: 12,
-    marginBottom: 8,
+    paddingTop: 24,
+    paddingBottom: 20,
   },
-  methodToggle: {
-    flexDirection: "row",
-    borderRadius: 12,
-    padding: 4,
-    gap: 2,
-  },
-  methodOption: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 9,
-  },
-  methodOptionText: {
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  methodDivider: {
-    width: 1,
-    marginVertical: 6,
-  },
-
-  // Hero Input
-  heroSection: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: COLORS.surface,
-    marginBottom: 8,
-  },
-  heroInput: {
+  titleInput: {
     fontSize: 22,
     fontWeight: "600",
     backgroundColor: "transparent",
     paddingHorizontal: 0,
-  },
-  heroSectionCompact: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    marginBottom: 0,
-  },
-  heroInputCompact: {
-    fontSize: 18,
+    lineHeight: 30,
+    minHeight: 56,
   },
 
-  // Sections
-  section: {
-    backgroundColor: COLORS.surface,
+  // List structure
+  listDivider: {
+    height: 1,
+  },
+
+  // Attribute rows
+  attrRow: {
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 20,
-    paddingVertical: 20,
-    marginBottom: 8,
+    paddingVertical: 15,
+    minHeight: 54,
   },
-  sectionLabel: {
+  attrRowLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    flex: 1,
+  },
+  attrRowLabel: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: COLORS.textPrimary,
+  },
+  attrRowRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  attrRowValue: {
     fontSize: 14,
-    fontWeight: "600",
     color: COLORS.textSecondary,
-    marginBottom: 14,
-    letterSpacing: -0.2,
+    maxWidth: 160,
+    textAlign: "right",
+  },
+  attrExpanded: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 16,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
   },
 
-  // Duration - Compact chips
+  // Schedule pills (inline toggle)
+  schedulePills: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  schedulePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: COLORS.background,
+  },
+  schedulePillText: {
+    fontSize: 13,
+    fontWeight: "500",
+    color: COLORS.textTertiary,
+  },
+  // Duration chips
   durationGrid: {
     flexDirection: "row",
     gap: 8,
@@ -1246,12 +1212,6 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     color: COLORS.textTertiary,
   },
-  selectedDateText: {
-    marginTop: 10,
-    fontSize: 13,
-    color: COLORS.gradientStart,
-    fontWeight: "500",
-  },
 
   // Notes
   notesInput: {
@@ -1264,85 +1224,7 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
   },
 
-  // Repeat
-  repeatToggle: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 8,
-  },
-  repeatToggleLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  repeatToggleText: {
-    fontSize: 15,
-    color: COLORS.textSecondary,
-  },
-  toggleSwitch: {
-    width: 44,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: "#E5E7EB",
-    padding: 2,
-    justifyContent: "center",
-  },
-  toggleKnob: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: "#FFFFFF",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.15,
-    shadowRadius: 2,
-    elevation: 2,
-  },
-  toggleKnobActive: {
-    alignSelf: "flex-end",
-  },
-  repeatOptions: {
-    marginTop: 16,
-    gap: 14,
-  },
-  frequencyRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  frequencyChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: "#F8F9FB",
-  },
-  frequencyChipText: {
-    fontSize: 13,
-    fontWeight: "500",
-    color: COLORS.textTertiary,
-  },
-  daySelector: {
-    flexDirection: "row",
-    gap: 8,
-    justifyContent: "space-between",
-  },
-  dayButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: "#F8F9FB",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  dayButtonText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: COLORS.textTertiary,
-  },
   // Tags
-  tagsSection: {
-    gap: 12,
-  },
   tagChips: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1444,21 +1326,12 @@ const styles = StyleSheet.create({
 
   // Bottom Action
   bottomAction: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.background,
     paddingHorizontal: 20,
     paddingVertical: 16,
-    paddingBottom: 32,
+    paddingBottom: 24,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 8,
   },
   bottomActionKeyboard: {
     paddingBottom: 12,
@@ -1483,4 +1356,5 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     letterSpacing: -0.3,
   },
+
 });

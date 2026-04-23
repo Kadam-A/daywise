@@ -119,7 +119,7 @@ export default function AccountSettingsScreen() {
         [{ text: 'OK' }]
       );
     } else {
-      router.push('/paywall');
+      router.push({ pathname: '/paywall', params: { source: 'account' } });
     }
   };
 

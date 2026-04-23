@@ -204,7 +204,7 @@ export async function scheduleTaskReminder(task: Task): Promise<string | null> {
     // Schedule the notification
     const notificationId = await Notifications.scheduleNotificationAsync({
       content: {
-        title: "⏰ Task Starting Soon",
+        title: "🔔 Task Starting Soon",
         body: `"${task.title}" starts in ${reminderMinutes} minutes`,
         data: { taskId: task.id },
         sound: "default",

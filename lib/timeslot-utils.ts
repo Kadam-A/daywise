@@ -11,6 +11,12 @@ export interface BusySlot {
   title: string;
 }
 
+export interface PartialConflict {
+  title: string;
+  startMin: number;  // minute within the hour the conflict starts (0–59)
+  endMin: number;    // minute within the hour the conflict ends (0–60)
+}
+
 export interface HourSlot {
   hour: number;                       // 0–23
   label: string;                      // e.g. "11:00 PM"
@@ -18,6 +24,7 @@ export interface HourSlot {
   busyReason?: string;
   busyMinutes: number[];              // which of [0,15,30,45] are blocked by a busy slot
   bleeds: boolean;                    // true when task end crosses midnight
+  partialConflicts: PartialConflict[]; // busy slots that partially overlap this hour
 }
 
 /**
@@ -83,8 +90,6 @@ export const generateHourSlots = (
   durationMinutes: number
 ): HourSlot[] => {
   const now = new Date();
-  const currentHourStart = new Date(now);
-  currentHourStart.setMinutes(0, 0, 0);
 
   const MINUTES = [0, 15, 30, 45];
 
@@ -92,13 +97,14 @@ export const generateHourSlots = (
     const hourStart = new Date(selectedDate);
     hourStart.setHours(hour, 0, 0, 0);
 
-    const isPastHour = hourStart < currentHourStart;
-
-    // Check each minute option individually against busy slots
+    // Check each minute option — mark busy if in the past OR overlaps a busy slot
     const busyMinutes = MINUTES.filter((m) => {
       const slotStart = new Date(selectedDate);
       slotStart.setHours(hour, m, 0, 0);
       const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60_000);
+
+      if (slotStart <= now) return true; // already started or passed
+
       return busySlots.some((b) => {
         const busyStart = new Date(b.start);
         const busyEnd = new Date(b.end);
@@ -112,22 +118,43 @@ export const generateHourSlots = (
     let status: "available" | "busy" = "available";
     let busyReason: string | undefined;
 
-    if (isPastHour) {
+    if (allMinutesBusy) {
       status = "busy";
-      busyReason = "Past";
-    } else if (allMinutesBusy) {
-      status = "busy";
-      // Use the busy reason from the :00 minute's conflicting slot
-      const slotStart = new Date(selectedDate);
-      slotStart.setHours(hour, 0, 0, 0);
-      const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60_000);
-      const conflicting = busySlots.find((b) => {
-        const busyStart = new Date(b.start);
-        const busyEnd = new Date(b.end);
-        return slotStart < busyEnd && slotEnd > busyStart;
-      });
-      busyReason = conflicting?.title;
+      // Determine reason — past or a real conflict
+      const firstSlotStart = new Date(selectedDate);
+      firstSlotStart.setHours(hour, 0, 0, 0);
+      if (firstSlotStart <= now) {
+        busyReason = "Past";
+      } else {
+        const slotEnd = new Date(firstSlotStart.getTime() + durationMinutes * 60_000);
+        const conflicting = busySlots.find((b) => {
+          const busyStart = new Date(b.start);
+          const busyEnd = new Date(b.end);
+          return firstSlotStart < busyEnd && slotEnd > busyStart;
+        });
+        busyReason = conflicting?.title;
+      }
     }
+
+    // Collect conflicts — all busy slots that touch this hour (shown as subtitles in the UI)
+    const partialConflicts: PartialConflict[] = status !== "busy"
+      ? busySlots
+          .filter((b) => {
+            const busyStart = new Date(b.start);
+            const busyEnd = new Date(b.end);
+            const hourEnd = new Date(selectedDate);
+            hourEnd.setHours(hour + 1, 0, 0, 0);
+            return busyStart < hourEnd && busyEnd > hourStart;
+          })
+          .map((b) => {
+            const busyStart = new Date(b.start);
+            const busyEnd = new Date(b.end);
+            const startMin = busyStart < hourStart ? 0 : busyStart.getMinutes();
+            const rawEnd = busyEnd.getHours() > hour || busyEnd.getDate() !== hourStart.getDate() ? 60 : busyEnd.getMinutes();
+            return { title: b.title, startMin, endMin: rawEnd };
+          })
+          .sort((a, b) => a.startMin - b.startMin)
+      : [];
 
     return {
       hour,
@@ -136,6 +163,7 @@ export const generateHourSlots = (
       busyReason,
       busyMinutes,
       bleeds: taskBleeds(hour, durationMinutes),
+      partialConflicts,
     };
   });
 };

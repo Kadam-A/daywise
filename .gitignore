@@ -30,9 +30,13 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# local env files — contains secrets
+eas.json
 .env
 .env*.local
+scripts/.env.test
+scripts/.env.test.example
+scripts/ai-reasoning-report.md
 .env.local
 .env.development
 .env.production
@@ -45,3 +49,51 @@ app-example
 # generated native folders
 /ios
 /android
+
+.env.local
+
+# Claude Code settings
+.claude/settings.local.json
+.claude/agent-memory/
+.claude/agents/
+.claude/skills/
+
+# Screenshots and media files (test/debug artifacts)
+app/Screenshot_*.jpg
+app/Record_*.mp4
+screenshots/curr/
+screenshots/darkmode/
+screenshots/mm.png
+screenshots/times.png
+screenshots/titcktick-week.png
+screenshots_app/
+screenshots_selected/
+
+# Loose image/icon files at root
+Gemini_Generated_Image_*.png
+Untitled.jpeg
+ic_launcher_foreground.png
+icon-background.png
+icon-foreground.png
+icon-monochrome.png
+icon.jpg
+icon.png
+icon1.png
+normal_icon.png
+"image copy.png"
+"image copy 2.png"
+image.png
+img_asset/
+index.zip
+
+# Marketing/generated assets (not source code)
+store_listing/
+
+# Scratch/notes files
+LANDING_PAGE.md
+explanation.txt
+test.txt
+v0.txt
+lib/names.txt
+lib/stuff.txt
+posthog-setup-report.md

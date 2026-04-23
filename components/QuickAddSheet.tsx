@@ -26,9 +26,11 @@ import { router } from "expo-router";
 import { format, addDays, endOfDay } from "date-fns";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { supabase } from "@/lib/supabase";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Task, TimeSlot, UserProfile, CalendarEvent } from "@/lib/types";
 import { useSubscription } from "@/contexts/SubscriptionContext";
 import { useAppColors } from "@/contexts/ThemeContext";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { scheduleTask } from "@/lib/scheduling";
 import { safeCreateCalendarEvent } from "@/lib/google-calendar";
 import { scheduleTaskReminder } from "@/lib/notifications";
@@ -49,7 +51,8 @@ const SHEET_HEIGHT = 400; // approximate max sheet height for animation
 
 export default function QuickAddSheet({ visible, onDismiss, onCreated, preselectedDate }: QuickAddSheetProps) {
   const appColors = useAppColors();
-  const { canUseAI, aiUsage, refreshAIUsage } = useSubscription();
+  const insets = useSafeAreaInsets();
+  const { isPro, refreshAIUsage } = useSubscription();
   const inputRef = useRef<TextInput>(null);
 
   // Animation values
@@ -57,16 +60,37 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
   const sheetTranslateY = useRef(new Animated.Value(SHEET_HEIGHT)).current;
   const [modalVisible, setModalVisible] = useState(false);
 
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const show = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+    const hide = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [showDescription, setShowDescription] = useState(false);
   const [duration, setDuration] = useState<Duration>("30");
   const [customDuration, setCustomDuration] = useState("45");
+
+  // Load default task duration from settings
+  useEffect(() => {
+    AsyncStorage.getItem("defaultTaskDuration").then((saved) => {
+      if (saved) {
+        const mins = parseInt(saved);
+        const validOptions: Duration[] = ["30", "60", "120"];
+        setDuration(validOptions.includes(String(mins) as Duration) ? String(mins) as Duration : "custom");
+        if (!validOptions.includes(String(mins) as Duration)) setCustomDuration(String(mins));
+      }
+    });
+  }, []);
   const [showCustomDurationModal, setShowCustomDurationModal] = useState(false);
   const [priority, setPriority] = useState<Priority>("medium");
 
-  const isAtWeeklyLimit = aiUsage && !aiUsage.isUnlimited && aiUsage.used >= aiUsage.limit;
-  const canUseSmartScheduling = canUseAI && !isAtWeeklyLimit;
+  const canUseSmartScheduling = isPro;
   const [schedulingMethod, setSchedulingMethod] = useState<"SMART" | "MANUAL">(
     "MANUAL"
   );
@@ -91,7 +115,16 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
       setTitle("");
       setDescription("");
       setShowDescription(false);
-      setDuration("30");
+      AsyncStorage.getItem("defaultTaskDuration").then((saved) => {
+        if (saved) {
+          const mins = parseInt(saved);
+          const validOptions: Duration[] = ["30", "60", "120"];
+          setDuration(validOptions.includes(String(mins) as Duration) ? String(mins) as Duration : "custom");
+          if (!validOptions.includes(String(mins) as Duration)) setCustomDuration(String(mins));
+        } else {
+          setDuration("30");
+        }
+      });
       setCustomDuration("45");
       setShowCustomDurationModal(false);
       setPriority("medium");
@@ -427,7 +460,7 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
           style={styles.keyboardView}
           pointerEvents="box-none"
         >
-          <Animated.View style={[styles.sheet, { backgroundColor: appColors.surface, transform: [{ translateY: sheetTranslateY }] }]}>
+          <Animated.View style={[styles.sheet, { backgroundColor: appColors.surface, transform: [{ translateY: sheetTranslateY }], paddingBottom: keyboardVisible ? 16 : insets.bottom + 16 }]}>
             <Pressable onPress={(e) => e.stopPropagation()}>
               {/* Handle bar */}
               <View style={[styles.handleBar, { backgroundColor: appColors.border }]} />
@@ -515,7 +548,7 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
                       setSchedulingMethod("SMART");
                     } else {
                       onDismiss();
-                      router.push("/paywall");
+                      router.push({ pathname: "/paywall", params: { source: "smart_scheduling" } });
                     }
                   }}
                 >
@@ -560,7 +593,10 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
                     >
                       {opt.value === "custom" ? (
                         duration === "custom" ? (
-                          <Text style={[styles.chipText, { color: appColors.primary }]}>{customDuration}m</Text>
+                          <>
+                            <Text style={[styles.chipText, { color: appColors.primary }]}>{customDuration}m</Text>
+                            <MaterialCommunityIcons name="pencil-outline" size={12} color={appColors.primary} />
+                          </>
                         ) : (
                           <MaterialCommunityIcons name="pencil-outline" size={14} color={appColors.textSecondary} />
                         )
@@ -734,7 +770,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 20,
-    paddingBottom: Platform.OS === "ios" ? 34 : 24,
     // Large soft shadow
     shadowColor: "#000",
     shadowOffset: { width: 0, height: -8 },

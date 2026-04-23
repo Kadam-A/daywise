@@ -31,8 +31,8 @@ export const PRODUCT_IDS = {
   PRO_YEARLY: 'daywise_pro_yearly',
 } as const;
 
-// Entitlement identifier
-export const ENTITLEMENT_ID = 'pro';
+// Entitlement identifier — must match RevenueCat dashboard exactly
+export const ENTITLEMENT_ID = 'DayWise Pro';
 
 let isInitialized = false;
 
@@ -149,6 +149,7 @@ export async function purchasePackage(
     // Check if purchase was successful
     if (customerInfo.entitlements.active[ENTITLEMENT_ID]) {
       await trackPurchaseCompleted(planName);
+      await syncSubscriptionFromCustomerInfo(customerInfo);
       console.log('[Purchases] Purchase successful');
       return { success: true, customerInfo };
     }
@@ -193,22 +194,34 @@ export async function startFreeTrial(
     const trialEndsAt = new Date();
     trialEndsAt.setDate(trialEndsAt.getDate() + durationDays);
 
-    // Update subscription to trial status
-    const { error } = await supabase
+    // Use UPDATE (not upsert) — the trigger always creates the row on signup,
+    // and Supabase upsert can silently skip the update path under RLS.
+    const { error, count } = await supabase
       .from('user_subscriptions')
-      .upsert({
-        user_id: user.id,
-        plan_id: 'free', // Still free plan, but with trial status
+      .update({
         status: 'trial',
         trial_ends_at: trialEndsAt.toISOString(),
-        trial_reason: reason, // Track why trial was granted
-      }, {
-        onConflict: 'user_id',
-      });
+        trial_reason: reason,
+      })
+      .eq('user_id', user.id)
+      .select('user_id', { count: 'exact', head: true });
+
+    console.log('[Purchases] Trial update result — error:', error, 'rows updated:', count);
 
     if (error) {
       console.error('[Purchases] Error starting trial:', error);
       return { success: false, error: error.message };
+    }
+
+    if (count === 0) {
+      // Row didn't exist yet (edge case: trigger hasn't run). Fall back to insert.
+      const { error: insertError } = await supabase
+        .from('user_subscriptions')
+        .insert({ user_id: user.id, status: 'trial', trial_ends_at: trialEndsAt.toISOString(), trial_reason: reason });
+      if (insertError) {
+        console.error('[Purchases] Trial insert fallback error:', insertError);
+        return { success: false, error: insertError.message };
+      }
     }
 
     await trackTrialStarted(reason);
@@ -238,6 +251,7 @@ export async function restorePurchases(): Promise<{
     if (customerInfo.entitlements.active[ENTITLEMENT_ID]) {
       const planId = getPlanIdFromCustomerInfo(customerInfo);
       await trackPurchaseRestored(planId);
+      await syncSubscriptionFromCustomerInfo(customerInfo);
       console.log('[Purchases] Purchases restored');
       return { success: true, customerInfo };
     }
@@ -269,6 +283,42 @@ export async function getCustomerInfo(): Promise<CustomerInfo | null> {
 export async function hasActiveSubscription(): Promise<boolean> {
   const customerInfo = await getCustomerInfo();
   return !!customerInfo?.entitlements.active[ENTITLEMENT_ID];
+}
+
+/**
+ * Immediately sync subscription to DB from RevenueCat customer info.
+ * Called after purchase/restore so the UI updates before the webhook fires.
+ */
+async function syncSubscriptionFromCustomerInfo(customerInfo: CustomerInfo): Promise<void> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const entitlement = customerInfo.entitlements.active[ENTITLEMENT_ID];
+    if (!entitlement) return;
+
+    const planId = getPlanIdFromCustomerInfo(customerInfo);
+    const expirationDate = entitlement.expirationDate ? new Date(entitlement.expirationDate) : null;
+
+    const { error } = await supabase
+      .from('user_subscriptions')
+      .upsert({
+        user_id: user.id,
+        plan_id: planId,
+        status: 'active',
+        current_period_end: expirationDate?.toISOString() || null,
+        cancel_at_period_end: false,
+        trial_ends_at: null,
+      }, { onConflict: 'user_id' });
+
+    if (error) {
+      console.error('[Purchases] Error syncing subscription to DB:', error);
+    } else {
+      console.log('[Purchases] Subscription synced to DB immediately');
+    }
+  } catch (err) {
+    console.error('[Purchases] syncSubscriptionFromCustomerInfo error:', err);
+  }
 }
 
 /**

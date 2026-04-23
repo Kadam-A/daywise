@@ -5,7 +5,7 @@
  * that feels alive and responsive to the user's day
  */
 
-import { View, StyleSheet, ScrollView, RefreshControl, Pressable, Animated, Dimensions, TextInput, Alert, Modal, Switch } from "react-native";
+import { View, StyleSheet, ScrollView, RefreshControl, Pressable, Animated, Dimensions, TextInput, Alert, Modal, Switch, AppState, AppStateStatus } from "react-native";
 import { Text, ActivityIndicator, ProgressBar, Surface, useTheme } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -15,9 +15,10 @@ import { router } from "expo-router";
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useFocusEffect } from "expo-router";
 import { supabase } from "@/lib/supabase";
-import { format, isToday, isPast, isFuture, parseISO, startOfDay, endOfDay, isBefore, differenceInMinutes, isWithinInterval } from "date-fns";
+import { format, isToday, isPast, isFuture, parseISO, startOfDay, endOfDay, endOfWeek, isBefore, isAfter, differenceInMinutes, isWithinInterval } from "date-fns";
 import { Task, CalendarEvent, TimeSlot } from "@/lib/types";
 import { scheduleTask, saveScheduledSlot } from "@/lib/scheduling";
+import { getIANATimezone, getUTCOffsetHours } from "@/lib/timezone";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   isGoogleCalendarConnected,
@@ -25,6 +26,7 @@ import {
   getLocalCalendarEvents,
 } from "@/lib/google-calendar";
 import { isRecurringInstance } from "@/lib/recurrence";
+import { trackTaskCompleted, trackTaskDeleted } from "@/lib/analytics";
 import ErrorState from "@/components/ErrorState";
 import { useNetwork } from "@/contexts/NetworkContext";
 import { queueOperation } from "@/lib/offline";
@@ -57,94 +59,56 @@ const COLORS = {
   border: "#E5E7EB",
 };
 
-// Welcome Card with accurate progress bar
+// Welcome Header — compact single-strip design
 function WelcomeCard({ displayName, taskStats }: { displayName: string; taskStats: { today: number; completed: number } }) {
   const appColors = useAppColors();
   const { isDark } = useThemeMode();
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(20)).current;
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 600,
-        useNativeDriver: true,
-      }),
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 600,
-        useNativeDriver: true,
-      }),
-    ]).start();
+    Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
   }, []);
 
   const getGreeting = () => {
     const hour = new Date().getHours();
-    if (hour < 12) return "Good morning";
-    if (hour < 17) return "Good afternoon";
-    return "Good evening";
+    if (hour < 12) return "Morning";
+    if (hour < 17) return "Afternoon";
+    return "Evening";
   };
 
   const completionPercent = taskStats.today > 0
     ? Math.round((taskStats.completed / taskStats.today) * 100)
     : 0;
 
-  const getMotivationalText = () => {
-    if (taskStats.today === 0) return "Your day is wide open";
-    if (completionPercent === 100) return "You're all done! Great work";
-    if (completionPercent >= 75) return "Almost there, keep going!";
-    if (completionPercent >= 50) return "Halfway through your day";
-    if (taskStats.completed > 0) return "Good progress so far";
-    return "Let's get started";
-  };
-
   return (
-    <Animated.View style={[styles.welcomeCardWrapper, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
-      <View style={[styles.welcomeCard, { backgroundColor: isDark ? appColors.surface : appColors.primaryLight }]}>
-        <View style={styles.welcomeTop}>
-          <View>
-            <Text style={[styles.welcomeGreeting, { color: appColors.textSecondary }]}>
-              {getGreeting()}{displayName ? `,` : ""}
-            </Text>
-            {displayName && (
-              <Text style={[styles.welcomeName, { color: appColors.textPrimary }]}>{displayName}</Text>
-            )}
-          </View>
-          <Text style={[styles.welcomeDate, { color: appColors.textSecondary, backgroundColor: isDark ? appColors.chipBg : `${appColors.primary}18` }]}>{format(new Date(), "EEE, MMM d")}</Text>
+    <Animated.View style={[styles.welcomeCardWrapper, { opacity: fadeAnim }]}>
+      <View style={styles.welcomeTop}>
+        <View style={styles.welcomeNameRow}>
+          <Text style={[styles.welcomeGreeting, { color: appColors.textSecondary }]}>{getGreeting()}{displayName ? "," : ""} </Text>
+          {displayName && <Text style={[styles.welcomeName, { color: appColors.textPrimary }]}>{displayName}</Text>}
         </View>
-
-        {/* Progress Section */}
-        <View style={styles.welcomeProgressSection}>
-          <View style={styles.welcomeProgressHeader}>
-            <Text style={[styles.welcomeMotivation, { color: appColors.textSecondary }]}>{getMotivationalText()}</Text>
-            <Text style={[styles.welcomeProgressPercent, { color: appColors.primary }]}>{completionPercent}%</Text>
-          </View>
-          <View style={[styles.welcomeProgressTrack, { backgroundColor: isDark ? appColors.inputBg : `${appColors.primary}20` }]}>
-            <View style={[styles.welcomeProgressFill, { width: `${completionPercent}%`, backgroundColor: appColors.primary }]} />
-          </View>
-          <Text style={[styles.welcomeProgressDetail, { color: appColors.textTertiary }]}>
-            {taskStats.completed} of {taskStats.today} tasks completed
-          </Text>
-        </View>
-
-        <View style={[styles.welcomeStatsRow, { backgroundColor: isDark ? appColors.inputBg : `${appColors.primary}18` }]}>
-          <View style={styles.welcomeStatChip}>
-            <Text style={[styles.welcomeStatChipNumber, { color: appColors.textPrimary }]}>{taskStats.today}</Text>
-            <Text style={[styles.welcomeStatChipLabel, { color: appColors.textTertiary }]}>today</Text>
-          </View>
-          <View style={styles.welcomeStatChip}>
-            <Text style={[styles.welcomeStatChipNumber, { color: appColors.textPrimary }]}>{taskStats.completed}</Text>
-            <Text style={[styles.welcomeStatChipLabel, { color: appColors.textTertiary }]}>done</Text>
-          </View>
-        </View>
+        <Text style={[styles.welcomeDate, { color: appColors.textTertiary }]}>{format(new Date(), "EEE d MMM")}</Text>
       </View>
+      <View style={styles.welcomeProgressRow}>
+        <View style={[styles.welcomeProgressTrack, { backgroundColor: isDark ? appColors.inputBg : `${appColors.primary}18` }]}>
+          <View style={[styles.welcomeProgressFill, { width: `${completionPercent}%`, backgroundColor: appColors.primary }]} />
+        </View>
+        <Text style={[styles.welcomeProgressFraction, { color: appColors.primary }]}>
+          {taskStats.completed}<Text style={[styles.welcomeProgressTotal, { color: appColors.textTertiary }]}>/{taskStats.today}</Text>
+        </Text>
+      </View>
+      <LinearGradient
+        colors={["transparent", appColors.border, "transparent"]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={styles.sectionFadeDivider}
+      />
     </Animated.View>
   );
 }
 
 // Enhanced Next Up Card with fluid design
-function NextUpCardEnhanced({ task, onMarkDone, onPress }: { task: Task; onMarkDone: () => void; onPress: () => void }) {
+function NextUpCardEnhanced({ task, onMarkDone, onPress, now }: { task: Task; onMarkDone: () => void; onPress: () => void; now: Date }) {
   const { colors } = useTheme();
   const appColors = useAppColors();
   const { isDark } = useThemeMode();
@@ -153,7 +117,6 @@ function NextUpCardEnhanced({ task, onMarkDone, onPress }: { task: Task; onMarkD
       return { urgency: "normal" as const, timeUntil: "Not scheduled", progress: 0 };
     }
 
-    const now = new Date();
     const start = new Date(task.scheduled_start);
     const end = new Date(task.scheduled_end);
     const minutesUntil = differenceInMinutes(start, now);
@@ -162,10 +125,10 @@ function NextUpCardEnhanced({ task, onMarkDone, onPress }: { task: Task; onMarkD
     let timeUntil: string;
     let progress = 0;
 
-    if (isPast(end)) {
+    if (now >= end) {
       urgency = "overdue";
       timeUntil = "Overdue";
-    } else if (isWithinInterval(now, { start, end })) {
+    } else if (now >= start && now < end) {
       urgency = "now";
       const totalDuration = differenceInMinutes(end, start);
       const elapsed = differenceInMinutes(now, start);
@@ -188,7 +151,7 @@ function NextUpCardEnhanced({ task, onMarkDone, onPress }: { task: Task; onMarkD
     }
 
     return { urgency, timeUntil, progress };
-  }, [task.scheduled_start, task.scheduled_end]);
+  }, [task.scheduled_start, task.scheduled_end, now]);
 
   const urgencyStyles = {
     normal: { bg: appColors.primaryLight, accent: appColors.primary, text: appColors.primary },
@@ -210,48 +173,41 @@ function NextUpCardEnhanced({ task, onMarkDone, onPress }: { task: Task; onMarkD
   return (
     <Pressable onPress={onPress} style={styles.nextUpWrapper}>
       <View style={[styles.nextUpCard, { backgroundColor: style.bg }]}>
-        {/* Status indicator line */}
-        <View style={[styles.nextUpIndicator, { backgroundColor: style.accent }]} />
-
         <View style={styles.nextUpContent}>
+          {/* Top row: label + time */}
           <View style={styles.nextUpHeader}>
             <View style={styles.nextUpLabelRow}>
               <MaterialCommunityIcons
                 name={urgency === "now" ? "play-circle" : urgency === "soon" ? "clock-fast" : urgency === "overdue" ? "alert-circle" : "clock-outline"}
-                size={16}
+                size={12}
                 color={style.accent}
               />
               <Text style={[styles.nextUpLabel, { color: style.accent }]}>
                 {urgency === "now" ? "IN PROGRESS" : urgency === "soon" ? "COMING UP" : urgency === "overdue" ? "OVERDUE" : "NEXT UP"}
               </Text>
             </View>
-            <Text style={[styles.nextUpTime, { color: style.text }]}>{timeUntil}</Text>
+            <Text style={[styles.nextUpTime, { color: style.accent }]}>{timeUntil}</Text>
           </View>
-
-          <Text style={[styles.nextUpTitle, { color: style.text }]} numberOfLines={2}>
-            {task.title}
-          </Text>
-
-          {task.scheduled_start && task.scheduled_end && (
-            <Text style={[styles.nextUpSchedule, { color: style.accent }]}>
-              {format(new Date(task.scheduled_start), "h:mm a")} - {format(new Date(task.scheduled_end), "h:mm a")}
-            </Text>
-          )}
-
-          {urgency === "now" && (
-            <View style={styles.nextUpProgress}>
-              <ProgressBar progress={progress} color={style.accent} style={styles.progressBar} />
-              <Text style={[styles.progressText, { color: style.text }]}>{Math.round(progress * 100)}%</Text>
+          {/* Bottom row: title + schedule + check */}
+          <View style={styles.nextUpBottomRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.nextUpTitle, { color: style.text }]} numberOfLines={1}>{task.title}</Text>
+              {task.scheduled_start && task.scheduled_end && (
+                <Text style={[styles.nextUpSchedule, { color: style.accent }]}>
+                  {format(new Date(task.scheduled_start), "h:mm a")}–{format(new Date(task.scheduled_end), "h:mm a")}
+                </Text>
+              )}
+              {urgency === "now" && (
+                <View style={styles.nextUpProgress}>
+                  <ProgressBar progress={progress} color={style.accent} style={[styles.progressBar, { flex: 1 }]} />
+                </View>
+              )}
             </View>
-          )}
-
-          <View style={styles.nextUpActions}>
             <Pressable
               style={[styles.nextUpButton, { backgroundColor: style.accent }]}
               onPress={onMarkDone}
             >
-              <MaterialCommunityIcons name="check" size={18} color="#FFFFFF" />
-              <Text style={styles.nextUpButtonText}>Complete</Text>
+              <MaterialCommunityIcons name="check" size={14} color="#FFFFFF" />
             </Pressable>
           </View>
         </View>
@@ -260,74 +216,93 @@ function NextUpCardEnhanced({ task, onMarkDone, onPress }: { task: Task; onMarkD
   );
 }
 
-// Task Row — agenda-style row (matches Today's Schedule visual language)
+// Task Row — title-first two-line layout
 function TaskCardRefined({ task, onPress, onLongPress, onReschedule, onComplete, progress, isOverdue, isMissedSlot, isPending, isSelecting, isSelected }: { task: Task; onPress: () => void; onLongPress?: () => void; onReschedule?: () => void; onComplete?: () => void; progress?: { completed: number; total: number } | null; isOverdue?: boolean; isMissedSlot?: boolean; isPending?: boolean; isSelecting?: boolean; isSelected?: boolean }) {
   const appColors = useAppColors();
   const { isDark } = useThemeMode();
-  const priorityColor = task.priority === "high" ? appColors.priorityHigh : task.priority === "medium" ? appColors.priorityMedium : appColors.priorityLow;
 
-  // Left column: state label or scheduled time
-  let leftLabel: string;
-  let leftColor: string;
+  // Priority: icon only, dedicated solely to importance
+  const priorityIcon = task.priority === "high" ? "flag" : task.priority === "medium" ? "flag" : null;
+  const priorityColor = task.priority === "high" ? appColors.priorityHigh : task.priority === "medium" ? appColors.priorityMedium : appColors.textTertiary;
+
+  // State: color on meta text only — red/amber means "late", not "important"
+  let metaLabel: string;
+  let metaColor: string;
   if (isOverdue) {
-    leftLabel = task.due_date ? format(new Date(task.due_date), "MMM d") : "--";
-    leftColor = appColors.error;
-  } else if (isMissedSlot) {
-    leftLabel = task.scheduled_start ? format(new Date(task.scheduled_start), "h:mm a") : "Missed";
-    leftColor = isDark ? appColors.warning : "#B45309";
-  } else if (isPending) {
-    leftLabel = "--";
-    leftColor = appColors.textTertiary;
-  } else {
     if (task.scheduled_start) {
-      const start = new Date(task.scheduled_start);
-      leftLabel = isToday(start) ? format(start, "h:mm a") : format(start, "EEE h:mm");
+      const s = new Date(task.scheduled_start);
+      metaLabel = isToday(s) ? format(s, "h:mm a") : format(s, "MMM d");
+    } else if (task.due_date) {
+      metaLabel = `Due ${format(new Date(task.due_date), "MMM d")}`;
     } else {
-      leftLabel = "--:--";
+      metaLabel = "Overdue";
     }
-    leftColor = appColors.textSecondary;
+    metaColor = appColors.error;
+  } else if (isMissedSlot) {
+    metaLabel = task.scheduled_start ? format(new Date(task.scheduled_start), "h:mm a") : "Missed";
+    metaColor = isDark ? appColors.warning : "#B45309";
+  } else if (isPending) {
+    metaLabel = "Not scheduled";
+    metaColor = appColors.textTertiary;
+  } else {
+    if (task.scheduled_start && task.scheduled_end) {
+      metaLabel = `${format(new Date(task.scheduled_start), "h:mm a")} – ${format(new Date(task.scheduled_end), "h:mm a")}`;
+    } else if (task.scheduled_start) {
+      const start = new Date(task.scheduled_start);
+      metaLabel = isToday(start) ? format(start, "h:mm a") : format(start, "EEE h:mm a");
+    } else {
+      metaLabel = "Not scheduled";
+    }
+    metaColor = appColors.textTertiary;
   }
-
-  const dotColor = isOverdue ? appColors.error : isMissedSlot ? (isDark ? appColors.warning : "#D97706") : priorityColor;
 
   return (
     <Pressable
       onPress={onPress}
       onLongPress={() => { if (!isSelecting) onLongPress?.(); }}
-      style={[styles.agendaItem, isSelected && { backgroundColor: appColors.primaryLight }]}
+      style={[styles.taskRowItem, isSelected && { backgroundColor: appColors.primaryLight }]}
     >
+      {/* Selection checkbox */}
       {isSelecting && (
         <MaterialCommunityIcons
           name={isSelected ? "checkbox-marked-circle" : "checkbox-blank-circle-outline"}
           size={22}
           color={isSelected ? appColors.primary : appColors.textTertiary}
-          style={{ marginRight: 8 }}
+          style={{ marginRight: 10 }}
         />
       )}
-      <View style={styles.agendaTimeCol}>
-        <Text style={[styles.agendaTime, { color: leftColor }]} numberOfLines={1}>{leftLabel}</Text>
-        {(task.is_recurring || isRecurringInstance(task)) && (
-          <MaterialCommunityIcons name="repeat" size={11} color={appColors.textTertiary} style={{ marginTop: 2 }} />
-        )}
-      </View>
-      <View style={styles.agendaContent}>
-        <Text style={[styles.agendaTitle, { color: appColors.textPrimary }]} numberOfLines={1}>{task.title}</Text>
-        <Text style={[styles.agendaDuration, { color: appColors.textTertiary }]}>{task.duration_minutes}m</Text>
-      </View>
-      {!isSelecting && (
-        <View style={styles.taskCardActions}>
-          {(isOverdue || isMissedSlot || isPending) && onReschedule && (
-            <Pressable onPress={onReschedule} hitSlop={10} style={[styles.miniCompletePill, { backgroundColor: appColors.chipBg }]}>
-              <MaterialCommunityIcons name="calendar-clock" size={14} color={appColors.textSecondary} />
-            </Pressable>
-          )}
-          {onComplete && task.status !== "completed" && (
-            <Pressable onPress={onComplete} style={styles.agendaCheck} hitSlop={10}>
-              <MaterialCommunityIcons name="checkbox-blank-circle-outline" size={22} color={dotColor} />
+
+      {/* Main content */}
+      <View style={styles.taskRowContent}>
+        {/* Title row */}
+        <View style={styles.taskRowTitleRow}>
+          <Text style={[styles.taskRowTitle, { color: appColors.textPrimary }]} numberOfLines={2}>{task.title}</Text>
+          {!isSelecting && onComplete && task.status !== "completed" && (
+            <Pressable onPress={onComplete} style={styles.taskRowCheck} hitSlop={10}>
+              <MaterialCommunityIcons name="checkbox-blank-circle-outline" size={22} color={appColors.border} />
             </Pressable>
           )}
         </View>
-      )}
+        {/* Meta row */}
+        <View style={styles.taskRowMeta}>
+          <Text style={[styles.taskRowMetaText, { color: metaColor }]}>{metaLabel}</Text>
+          {task.duration_minutes > 0 && (
+            <Text style={[styles.taskRowMetaDot, { color: appColors.textTertiary }]}> · {task.duration_minutes}m</Text>
+          )}
+          {(task.is_recurring || isRecurringInstance(task)) && (
+            <MaterialCommunityIcons name="repeat" size={11} color={appColors.textTertiary} style={{ marginLeft: 4 }} />
+          )}
+          {priorityIcon && (
+            <MaterialCommunityIcons name={priorityIcon as any} size={11} color={priorityColor} style={{ marginLeft: 4 }} />
+          )}
+          {!isSelecting && (isOverdue || isMissedSlot || isPending) && onReschedule && (
+            <Pressable onPress={onReschedule} hitSlop={10} style={[styles.taskRowReschedule, { backgroundColor: appColors.chipBg }]}>
+              <MaterialCommunityIcons name="calendar-clock" size={12} color={appColors.textSecondary} />
+              <Text style={[styles.taskRowRescheduleText, { color: appColors.textSecondary }]}>Reschedule</Text>
+            </Pressable>
+          )}
+        </View>
+      </View>
     </Pressable>
   );
 }
@@ -416,14 +391,14 @@ function CollapsibleSectionRefined({
 }
 
 // Search Bar component
-function SearchBar({ value, onChangeText, onClear }: { value: string; onChangeText: (text: string) => void; onClear: () => void }) {
-  const { colors } = useTheme();
+function SearchBar({ value, onChangeText, onClear, onDismiss, inputRef }: { value: string; onChangeText: (text: string) => void; onClear: () => void; onDismiss: () => void; inputRef?: React.RefObject<any> }) {
   const appColors = useAppColors();
   return (
     <View style={styles.searchBarWrapper}>
       <View style={[styles.searchBar, { backgroundColor: appColors.surface }]}>
-        <Ionicons name="search" size={20} color={appColors.textTertiary} style={styles.searchIcon} />
+        <Ionicons name="search" size={16} color={appColors.textTertiary} style={styles.searchIcon} />
         <TextInput
+          ref={inputRef}
           style={[styles.searchInput, { color: appColors.textPrimary }]}
           placeholder="Search tasks..."
           placeholderTextColor={appColors.textTertiary}
@@ -431,10 +406,15 @@ function SearchBar({ value, onChangeText, onClear }: { value: string; onChangeTe
           onChangeText={onChangeText}
           autoCapitalize="none"
           autoCorrect={false}
+          returnKeyType="search"
         />
-        {value.length > 0 && (
-          <Pressable onPress={onClear} hitSlop={10}>
-            <Ionicons name="close-circle" size={20} color={appColors.textTertiary} />
+        {value.length > 0 ? (
+          <Pressable onPress={() => { onClear(); onDismiss(); }} hitSlop={10}>
+            <Ionicons name="close-circle" size={18} color={appColors.textTertiary} />
+          </Pressable>
+        ) : (
+          <Pressable onPress={onDismiss} hitSlop={10}>
+            <Text style={{ fontSize: 13, color: appColors.textTertiary }}>Cancel</Text>
           </Pressable>
         )}
       </View>
@@ -470,7 +450,6 @@ function SectionHeader({ title, count, onViewAll }: { title: string; count?: num
 function AgendaTaskItem({ task, onPress, onComplete, onLongPress, isSelecting, isSelected }: { task: Task; onPress: () => void; onComplete: () => void; onLongPress?: () => void; isSelecting?: boolean; isSelected?: boolean }) {
   const { colors } = useTheme();
   const appColors = useAppColors();
-  const priorityColor = task.priority === "high" ? appColors.priorityHigh : task.priority === "medium" ? appColors.priorityMedium : appColors.priorityLow;
   const startTime = task.scheduled_start ? format(new Date(task.scheduled_start), "h:mm a") : "--:--";
   const endTime = task.scheduled_end ? format(new Date(task.scheduled_end), "h:mm a") : "";
 
@@ -481,33 +460,42 @@ function AgendaTaskItem({ task, onPress, onComplete, onLongPress, isSelecting, i
       end: new Date(task.scheduled_end)
     });
 
+  const metaLabel = startTime + (endTime ? ` – ${endTime}` : "");
+  const priorityIcon = task.priority === "high" ? "flag" : task.priority === "medium" ? "flag" : null;
+  const priorityColor = task.priority === "high" ? appColors.priorityHigh : appColors.priorityMedium;
+
   return (
-    <Pressable onPress={onPress} onLongPress={onLongPress} style={[styles.agendaItem, isActive && [styles.agendaItemActive, { backgroundColor: appColors.primaryLight }], isSelected && { backgroundColor: appColors.primaryLight }]}>
+    <Pressable onPress={onPress} onLongPress={onLongPress} style={[styles.taskRowItem, isActive && { backgroundColor: appColors.primaryLight }, isSelected && { backgroundColor: appColors.primaryLight }]}>
       {isSelecting && (
         <MaterialCommunityIcons
           name={isSelected ? "checkbox-marked-circle" : "checkbox-blank-circle-outline"}
           size={22}
           color={isSelected ? appColors.primary : appColors.textTertiary}
-          style={{ marginRight: 8 }}
+          style={{ marginRight: 10 }}
         />
       )}
-      <View style={[styles.agendaTimeCol, isActive && styles.agendaTimeColActive]}>
-        <Text style={[styles.agendaTime, { color: appColors.textSecondary }, isActive && { color: appColors.primary }]}>{startTime}</Text>
-        {endTime && <Text style={[styles.agendaTimeEnd, { color: appColors.textTertiary }]}>{endTime}</Text>}
+      <View style={styles.taskRowContent}>
+        <View style={styles.taskRowTitleRow}>
+          <Text style={[styles.taskRowTitle, { color: appColors.textPrimary }]} numberOfLines={2}>{task.title}</Text>
+          {!isSelecting && (
+            <Pressable onPress={onComplete} style={styles.taskRowCheck} hitSlop={10}>
+              <MaterialCommunityIcons name="checkbox-blank-circle-outline" size={22} color={appColors.border} />
+            </Pressable>
+          )}
+        </View>
+        <View style={styles.taskRowMeta}>
+          <Text style={[styles.taskRowMetaText, { color: isActive ? appColors.primary : appColors.textTertiary }]}>{metaLabel}</Text>
+          {task.duration_minutes > 0 && (
+            <Text style={[styles.taskRowMetaDot, { color: appColors.textTertiary }]}> · {task.duration_minutes}m</Text>
+          )}
+          {(task.is_recurring || isRecurringInstance(task)) && (
+            <MaterialCommunityIcons name="repeat" size={11} color={appColors.textTertiary} style={{ marginLeft: 4 }} />
+          )}
+          {priorityIcon && (
+            <MaterialCommunityIcons name={priorityIcon as any} size={11} color={priorityColor} style={{ marginLeft: 4 }} />
+          )}
+        </View>
       </View>
-      <View style={styles.agendaContent}>
-        <Text style={[styles.agendaTitle, { color: appColors.textPrimary }]} numberOfLines={1}>{task.title}</Text>
-        <Text style={[styles.agendaDuration, { color: appColors.textTertiary }]}>{task.duration_minutes}m</Text>
-      </View>
-      {!isSelecting && (
-        <Pressable onPress={onComplete} style={styles.agendaCheck} hitSlop={10}>
-          <MaterialCommunityIcons
-            name="checkbox-blank-circle-outline"
-            size={22}
-            color={priorityColor}
-          />
-        </Pressable>
-      )}
     </Pressable>
   );
 }
@@ -543,20 +531,23 @@ function CompletedTaskRow({ task, onPress, onUndo }: { task: Task; onPress: () =
   const startTime = task.scheduled_start ? format(new Date(task.scheduled_start), "h:mm a") : "";
 
   return (
-    <Pressable onPress={onPress} style={styles.agendaItem}>
-      <View style={styles.agendaTimeCol}>
-        <Text style={[styles.agendaTime, { color: appColors.textTertiary }]} numberOfLines={1}>{startTime || "Done"}</Text>
+    <Pressable onPress={onPress} style={styles.taskRowItem}>
+      <View style={styles.taskRowContent}>
+        <View style={styles.taskRowTitleRow}>
+          <Text style={[styles.taskRowTitle, { color: appColors.textTertiary, textDecorationLine: "line-through" }]} numberOfLines={2}>{task.title}</Text>
+          {onUndo && (
+            <Pressable onPress={onUndo} hitSlop={8} style={[styles.taskRowCheck, styles.miniCompletePill, { backgroundColor: appColors.chipBg }]}>
+              <MaterialCommunityIcons name="undo-variant" size={14} color={appColors.textTertiary} />
+            </Pressable>
+          )}
+        </View>
+        <View style={styles.taskRowMeta}>
+          {startTime ? <Text style={[styles.taskRowMetaText, { color: appColors.textTertiary }]}>{startTime}</Text> : null}
+          {task.duration_minutes > 0 && (
+            <Text style={[styles.taskRowMetaDot, { color: appColors.textTertiary }]}>{startTime ? " · " : ""}{task.duration_minutes}m</Text>
+          )}
+        </View>
       </View>
-      <View style={[styles.agendaDot, { backgroundColor: appColors.success }]} />
-      <View style={styles.agendaContent}>
-        <Text style={[styles.agendaTitle, { color: appColors.textTertiary, textDecorationLine: "line-through" }]} numberOfLines={1}>{task.title}</Text>
-        <Text style={[styles.agendaDuration, { color: appColors.textTertiary }]}>{task.duration_minutes}m</Text>
-      </View>
-      {onUndo && (
-        <Pressable onPress={onUndo} hitSlop={8} style={[styles.miniCompletePill, { backgroundColor: appColors.chipBg }]}>
-          <MaterialCommunityIcons name="undo-variant" size={14} color={appColors.textTertiary} />
-        </Pressable>
-      )}
     </Pressable>
   );
 }
@@ -571,6 +562,21 @@ export default function HomeScreen() {
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [navigatingToPaywall, setNavigatingToPaywall] = useState(false);
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Re-fetch when app comes back to foreground
+  useEffect(() => {
+    const handleAppState = (next: AppStateStatus) => {
+      if (next === "active") loadData();
+    };
+    const sub = AppState.addEventListener("change", handleAppState);
+    return () => sub.remove();
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [overdueExpanded, setOverdueExpanded] = useState(true);
   const [missedSlotExpanded, setMissedSlotExpanded] = useState(true);
@@ -592,6 +598,9 @@ export default function HomeScreen() {
   } | null>(null);
   const batchToastAnim = useRef(new Animated.Value(0)).current;
   const batchToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollViewRef = useRef<any>(null);
+  const [showRescheduleReview, setShowRescheduleReview] = useState(false);
+
 
   // Complete-task undo toast
   const [completeToast, setCompleteToast] = useState<{ taskId: string; taskTitle: string; prevStatus: Task["status"] } | null>(null);
@@ -599,6 +608,33 @@ export default function HomeScreen() {
   const completeToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showSearch, setShowSearch] = useState(false);
+  const [showRestOfWeek, setShowRestOfWeek] = useState(false);
+  const searchInputRef = useRef<any>(null);
+  const [pinnedTags, setPinnedTags] = useState<string[]>([]);
+  const [showTagInput, setShowTagInput] = useState(false);
+  const [newTagValue, setNewTagValue] = useState("");
+  const tagInputRef = useRef<any>(null);
+
+  useEffect(() => {
+    AsyncStorage.getItem("pinnedTags").then((val) => {
+      if (val) setPinnedTags(JSON.parse(val));
+    });
+  }, []);
+
+  const savePinnedTag = async (tag: string) => {
+    const trimmed = tag.trim().toLowerCase();
+    if (!trimmed) return;
+    const updated = pinnedTags.includes(trimmed) ? pinnedTags : [...pinnedTags, trimmed];
+    setPinnedTags(updated);
+    await AsyncStorage.setItem("pinnedTags", JSON.stringify(updated));
+  };
+
+  const removePinnedTag = async (tag: string) => {
+    const updated = pinnedTags.filter((t) => t !== tag);
+    setPinnedTags(updated);
+    await AsyncStorage.setItem("pinnedTags", JSON.stringify(updated));
+  };
 
   // Multi-select state
   const [isSelecting, setIsSelecting] = useState(false);
@@ -612,46 +648,56 @@ export default function HomeScreen() {
   const [feedbackTask, setFeedbackTask] = useState<Task | null>(null);
 
   // Guided tour
-  const { tourStep, advanceTour, skipTour } = useGuidedTour();
-  const { refreshAIUsage, isPro, features } = useSubscription();
+  const { tourStep, advanceTour, skipTour: _skipTour, setIsManualTour } = useGuidedTour();
+  const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
+  const { refreshAIUsage, isPro, features, isTrialing, trialDaysRemaining, hasEverTrialed } = useSubscription();
   const isInAddTaskFlow = [
     "tour_task_title", "tour_task_duration", "tour_task_priority",
     "tour_task_due", "tour_task_tag", "tour_task_create_ai",
   ].includes(tourStep ?? "");
 
-  // Get all unique tags from tasks
+  // Get all unique tags from tasks + pinned tags
   const allTags = useMemo(() => {
-    const tagSet = new Set<string>();
+    const tagSet = new Set<string>(pinnedTags);
     tasks.forEach((task) => {
       if (task.tags) {
         task.tags.forEach((tag) => tagSet.add(tag));
       }
     });
     return Array.from(tagSet).sort();
-  }, [tasks]);
+  }, [tasks, pinnedTags]);
 
   // Refresh data when screen comes into focus
   useFocusEffect(
     useCallback(() => {
+      setNavigatingToPaywall(false);
       loadData();
     }, [])
   );
 
   const loadData = async () => {
+    console.log('[Home] isPro:', isPro, 'isTrialing:', isTrialing, 'trialDaysRemaining:', trialDaysRemaining, 'hasEverTrialed:', hasEverTrialed, 'tourStep:', tourStep);
     try {
       setError(null);
 
-      // Get user name + auto-reschedule enabled flag
+      // Get user name + auto-reschedule flag from dedicated column
       const { data: profile } = await supabase
         .from("user_profiles")
-        .select("display_name, personality_data")
+        .select("display_name, personality_data, auto_reschedule_enabled")
         .single();
 
       if (profile?.display_name) {
         setDisplayName(profile.display_name.split(" ")[0]);
       }
-      if (profile?.personality_data?.auto_reschedule_enabled !== undefined) {
-        setAutoRescheduleEnabled(profile.personality_data.auto_reschedule_enabled);
+      setAutoRescheduleEnabled(profile?.auto_reschedule_enabled ?? true);
+
+      // Silently refresh timezone on every load — handles travellers and DST changes
+      const { data: { user: tzUser } } = await supabase.auth.getUser();
+      if (tzUser) {
+        supabase.from("user_profiles").update({
+          auto_reschedule_tz_name: getIANATimezone(),
+          auto_reschedule_tz_offset: getUTCOffsetHours(),
+        }).eq("id", tzUser.id).then(() => {});
       }
 
       // Get tasks — apply 30-day history limit for free users
@@ -709,6 +755,10 @@ export default function HomeScreen() {
   const [showRescheduleAllInfo, setShowRescheduleAllInfo] = useState(false);
 
   const handleRescheduleAll = () => {
+    if (!isPro) {
+      router.push({ pathname: "/paywall", params: { source: "reschedule_all" } });
+      return;
+    }
     setShowBulkReschedule(true);
   };
 
@@ -754,6 +804,7 @@ export default function HomeScreen() {
   const handleUndoBatchReschedule = async () => {
     if (!batchToast) return;
     hideBatchToast();
+    setShowRescheduleReview(false);
     await Promise.all(
       batchToast.tasks.map(({ taskId, prevStart, prevEnd }) =>
         supabase.from("tasks").update({
@@ -763,6 +814,25 @@ export default function HomeScreen() {
         }).eq("id", taskId)
       )
     );
+    loadData();
+  };
+
+  const handleUndoSingleRescheduled = async (taskId: string) => {
+    if (!batchToast) return;
+    const task = batchToast.tasks.find((t) => t.taskId === taskId);
+    if (!task) return;
+    await supabase.from("tasks").update({
+      scheduled_start: task.prevStart || null,
+      scheduled_end: task.prevEnd || null,
+      status: task.prevStart ? "scheduled" : "pending_schedule",
+    }).eq("id", taskId);
+    const remaining = batchToast.tasks.filter((t) => t.taskId !== taskId);
+    if (remaining.length === 0) {
+      hideBatchToast();
+      setShowRescheduleReview(false);
+    } else {
+      setBatchToast({ count: remaining.length, tasks: remaining });
+    }
     loadData();
   };
 
@@ -799,16 +869,16 @@ export default function HomeScreen() {
 
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const { data: profile } = await supabase.from("user_profiles").select("*").eq("id", user.id).single();
-    if (!profile) return; // no profile — can't schedule without user context
-    const pd = profile.personality_data;
-    if (pd?.auto_reschedule_enabled === false) return;
+    const { data: profile } = await supabase
+      .from("user_profiles")
+      .select("personality_data, auto_reschedule_enabled, auto_reschedule_morning, auto_reschedule_evening, auto_reschedule_tz_offset")
+      .eq("id", user.id)
+      .single();
+    if (!profile) return;
+    if (profile.auto_reschedule_enabled === false) return;
 
-    // Stored as minutes from midnight; migrate old hour values (< 24) on the fly
-    const rawMorning = pd?.auto_reschedule_morning ?? 540;
-    const rawEvening = pd?.auto_reschedule_evening ?? 1140;
-    const morningMinutes: number = rawMorning < 24 ? rawMorning * 60 : rawMorning;
-    const eveningMinutes: number = rawEvening < 24 ? rawEvening * 60 : rawEvening;
+    const morningMinutes: number = profile.auto_reschedule_morning ?? 540;
+    const eveningMinutes: number = profile.auto_reschedule_evening ?? 1140;
 
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
@@ -822,6 +892,27 @@ export default function HomeScreen() {
     const shouldRunEvening = currentMinutes >= eveningMinutes && lastEvening !== todayStr;
 
     if (!shouldRunMorning && !shouldRunEvening) return;
+
+    // Freemium limit: free users get 1 auto-reschedule per week
+    if (!isPro && features.auto_reschedule_per_week !== -1) {
+      const dayOfWeek = now.getDay();
+      const daysFromMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+      const weekStart = new Date(now);
+      weekStart.setDate(weekStart.getDate() - daysFromMonday);
+      weekStart.setHours(0, 0, 0, 0);
+
+      const { count } = await supabase
+        .from("auto_reschedule_log")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", user.id)
+        .gte("rescheduled_at", weekStart.toISOString());
+
+      if ((count ?? 0) >= features.auto_reschedule_per_week) {
+        console.log("[AutoReschedule] Free-tier weekly limit reached, skipping");
+        return;
+      }
+    }
+
     if (shouldRunMorning) await AsyncStorage.setItem(morningKey, todayStr);
     if (shouldRunEvening) await AsyncStorage.setItem(eveningKey, todayStr);
     const { data: existingTasks } = await supabase.from("tasks").select("*")
@@ -860,6 +951,8 @@ export default function HomeScreen() {
           const success = await saveScheduledSlot(task, slot);
           if (success) {
             rescheduled.push({ taskId: task.id, taskTitle: task.title, newStart: slot.start, prevStart: task.scheduled_start ?? undefined, prevEnd: task.scheduled_end ?? undefined });
+            // Log for free-tier weekly tracking
+            await supabase.from("auto_reschedule_log").insert({ user_id: user.id, task_id: task.id });
           }
         }
       } catch (e) {
@@ -876,6 +969,9 @@ export default function HomeScreen() {
 
   const checkMissedSlotState = async (tasks: Task[]) => {
     if (tasks.length === 0) return;
+
+    // Auto-reschedule is Pro-only — don't prompt or run for free users
+    if (!isPro) return;
 
     // Check if the user has already made a choice about auto-reschedule.
     // Once they have, Supabase (auto_reschedule_enabled) is the single source of truth.
@@ -899,15 +995,11 @@ export default function HomeScreen() {
 
   const handleAutoRescheduleEnable = async () => {
     await AsyncStorage.setItem("autoRescheduleIntroSeen", "true");
-    // Save enabled=true to Supabase so Settings and this flag stay in sync
     const { data: { user } } = await supabase.auth.getUser();
-    const { data: profile } = await supabase.from("user_profiles").select("personality_data").eq("id", user?.id).single();
     await supabase.from("user_profiles").update({
-      personality_data: {
-        ...profile?.personality_data,
-        auto_reschedule_enabled: true,
-        auto_reschedule_tz_offset: -new Date().getTimezoneOffset() / 60,
-      },
+      auto_reschedule_enabled: true,
+      auto_reschedule_tz_name: getIANATimezone(),
+      auto_reschedule_tz_offset: getUTCOffsetHours(),
     }).eq("id", user?.id);
     setShowAutoRescheduleIntro(false);
     autoRescheduleGreyZone(missedSlotTasks);
@@ -918,31 +1010,26 @@ export default function HomeScreen() {
     const count = parseInt(countStr || "0") + 1;
     await AsyncStorage.setItem("autoRescheduleDeclineCount", String(count));
     if (count >= 3) {
-      // Permanently declined — write to Supabase and never show intro again
       await AsyncStorage.setItem("autoRescheduleIntroSeen", "true");
       const { data: { user } } = await supabase.auth.getUser();
-      const { data: profile } = await supabase.from("user_profiles").select("personality_data").eq("id", user?.id).single();
-      await supabase.from("user_profiles").update({
-        personality_data: { ...profile?.personality_data, auto_reschedule_enabled: false },
-      }).eq("id", user?.id);
+      await supabase.from("user_profiles").update({ auto_reschedule_enabled: false }).eq("id", user?.id);
     }
     setShowAutoRescheduleIntro(false);
   };
 
   const handleToggleAutoReschedule = async (value: boolean) => {
-    // Optimistic update
+    if (!isPro) {
+      router.push({ pathname: "/paywall", params: { source: "auto_reschedule" } });
+      return;
+    }
     setAutoRescheduleEnabled(value);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      const { data: profile } = await supabase.from("user_profiles").select("personality_data").eq("id", user?.id).single();
-      await supabase.from("user_profiles").update({
-        personality_data: { ...profile?.personality_data, auto_reschedule_enabled: value },
-      }).eq("id", user?.id);
-      // If user explicitly enabled, mark intro as seen so we don't re-prompt
+      await supabase.from("user_profiles").update({ auto_reschedule_enabled: value }).eq("id", user?.id);
       if (value) await AsyncStorage.setItem("autoRescheduleIntroSeen", "true");
     } catch (e) {
       console.error("[Home] Failed to save auto-reschedule toggle:", e);
-      setAutoRescheduleEnabled(!value); // revert on failure
+      setAutoRescheduleEnabled(!value);
     }
   };
 
@@ -992,6 +1079,9 @@ export default function HomeScreen() {
         .in("id", ids);
 
       if (updateError) throw updateError;
+
+      // Track each completed task
+      ids.forEach(() => trackTaskCompleted());
     } catch (err) {
       console.error("[Home] Bulk complete error:", err);
       loadData(); // Revert by reloading
@@ -1020,6 +1110,8 @@ export default function HomeScreen() {
                 .in("id", ids);
 
               if (deleteError) throw deleteError;
+
+              ids.forEach(() => trackTaskDeleted()); // fire-and-forget
             } catch (err) {
               console.error("[Home] Bulk delete error:", err);
               loadData();
@@ -1141,6 +1233,19 @@ export default function HomeScreen() {
     [parentTasks, overdueIds, missedSlotIds]
   );
 
+  const restOfWeekTasks = useMemo(() => {
+    const weekEnd = endOfWeek(new Date(), { weekStartsOn: 1 }); // Mon–Sun
+    return parentTasks.filter(
+      (t) => t.scheduled_start
+        && !isToday(new Date(t.scheduled_start))
+        && isAfter(new Date(t.scheduled_start), new Date())
+        && isBefore(new Date(t.scheduled_start), weekEnd)
+        && t.status === "scheduled"
+        && !overdueIds.has(t.id)
+        && !missedSlotIds.has(t.id)
+    ).sort((a, b) => new Date(a.scheduled_start!).getTime() - new Date(b.scheduled_start!).getTime());
+  }, [parentTasks, overdueIds, missedSlotIds]);
+
   const pendingTasks = useMemo(
     () => parentTasks.filter((t) => t.status === "pending_schedule" && !overdueIds.has(t.id) && !missedSlotIds.has(t.id)),
     [parentTasks, overdueIds, missedSlotIds]
@@ -1217,6 +1322,8 @@ export default function HomeScreen() {
 
       const { error: updateError } = await supabase.from("tasks").update({ status: "completed" }).eq("id", task.id);
       if (updateError) throw updateError;
+
+      trackTaskCompleted(); // fire-and-forget
     } catch (err) {
       console.error("[Home] Error marking task done:", err);
       // Revert optimistic update on failure
@@ -1267,6 +1374,7 @@ export default function HomeScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: appColors.background }]} edges={["top"]}>
       <ScrollView
+        ref={scrollViewRef}
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[appColors.primary]} />}
@@ -1287,7 +1395,10 @@ export default function HomeScreen() {
         {/* Tour States Modal */}
         <TourStatesModal
           visible={tourStep === "tour_states"}
-          onClose={() => advanceTour("tour_add_manual")}
+          onClose={() => {
+            advanceTour("tour_calendar_views");
+            router.push("/(tabs)/calendar");
+          }}
         />
 
         {/* Action Error Toast */}
@@ -1301,37 +1412,145 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Search Bar */}
-        <SearchBar
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onClear={() => setSearchQuery("")}
-        />
-
-        {/* Tag Filter Pills */}
-        {allTags.length > 0 && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.tagFilterScroll}
-            contentContainerStyle={styles.tagFilterContent}
+        {/* Trial / upgrade banner — hidden during tour */}
+        {!tourStep && isTrialing && trialDaysRemaining !== null && (
+          <Pressable
+            onPress={() => {
+              setNavigatingToPaywall(true);
+              setTimeout(() => router.push("/paywall"), 100);
+            }}
+            disabled={navigatingToPaywall}
+            style={[styles.trialBanner, { backgroundColor: appColors.primaryLight, borderColor: `${appColors.primary}30` }]}
           >
-            <Pressable
-              style={[styles.tagPill, { backgroundColor: appColors.surface, borderColor: appColors.border }, selectedTag === null && { backgroundColor: appColors.primary, borderColor: appColors.primary }]}
-              onPress={() => setSelectedTag(null)}
+            <MaterialCommunityIcons name="clock-outline" size={16} color={appColors.primary} />
+            <Text style={[styles.trialBannerText, { color: appColors.primary }]}>
+              {trialDaysRemaining} day{trialDaysRemaining !== 1 ? "s" : ""} left in your Pro trial
+            </Text>
+            <Text style={[styles.trialBannerCta, { color: appColors.primary }]}>Upgrade →</Text>
+            {navigatingToPaywall && <ActivityIndicator size={14} color={appColors.primary} style={{ marginLeft: 4 }} />}
+          </Pressable>
+        )}
+        {!tourStep && !isPro && !isTrialing && !hasEverTrialed && (
+          <Pressable
+            onPress={() => {
+              setNavigatingToPaywall(true);
+              setTimeout(() => router.push("/paywall"), 100);
+            }}
+            disabled={navigatingToPaywall}
+            style={[styles.trialBanner, { backgroundColor: appColors.secondaryLight, borderColor: `${appColors.secondary}30` }]}
+          >
+            <MaterialCommunityIcons name="gift-outline" size={16} color={appColors.secondary} />
+            <Text style={[styles.trialBannerText, { color: appColors.secondary }]}>
+              Try Pro free for 7 days — no card needed
+            </Text>
+            <Text style={[styles.trialBannerCta, { color: appColors.secondary }]}>Start →</Text>
+            {navigatingToPaywall && <ActivityIndicator size={14} color={appColors.secondary} style={{ marginLeft: 4 }} />}
+          </Pressable>
+        )}
+        {!tourStep && !isPro && !isTrialing && hasEverTrialed && (
+          <Pressable
+            onPress={() => {
+              setNavigatingToPaywall(true);
+              setTimeout(() => router.push("/paywall"), 100);
+            }}
+            disabled={navigatingToPaywall}
+            style={[styles.trialBanner, { backgroundColor: appColors.primaryLight, borderColor: `${appColors.primary}30` }]}
+          >
+            <MaterialCommunityIcons name="crown-outline" size={16} color={appColors.primary} />
+            <Text style={[styles.trialBannerText, { color: appColors.primary }]}>
+              Your trial has ended — upgrade to keep AI scheduling
+            </Text>
+            <Text style={[styles.trialBannerCta, { color: appColors.primary }]}>Upgrade →</Text>
+            {navigatingToPaywall && <ActivityIndicator size={14} color={appColors.primary} style={{ marginLeft: 4 }} />}
+          </Pressable>
+        )}
+
+        {/* Search trigger — small icon, hidden when search is open */}
+        {!showSearch && searchQuery.length === 0 && (
+          <Pressable
+            onPress={() => { setShowSearch(true); setTimeout(() => searchInputRef.current?.focus(), 50); }}
+            style={styles.searchTrigger}
+            hitSlop={12}
+          >
+            <Ionicons name="search" size={16} color={appColors.textTertiary} />
+            <Text style={[styles.searchTriggerText, { color: appColors.textTertiary }]}>Search tasks</Text>
+          </Pressable>
+        )}
+
+        {/* Search Bar — only shown when active */}
+        {(showSearch || searchQuery.length > 0) && (
+          <>
+            <SearchBar
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onClear={() => setSearchQuery("")}
+              onDismiss={() => { setShowSearch(false); setSearchQuery(""); setSelectedTag(null); }}
+              inputRef={searchInputRef}
+            />
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.tagFilterScroll}
+              contentContainerStyle={styles.tagFilterContent}
             >
-              <Text style={[styles.tagPillText, { color: appColors.textSecondary }, selectedTag === null && styles.tagPillTextActive]}>All</Text>
-            </Pressable>
-            {allTags.map((tag) => (
-              <Pressable
-                key={tag}
-                style={[styles.tagPill, { backgroundColor: appColors.surface, borderColor: appColors.border }, selectedTag === tag && { backgroundColor: appColors.primary, borderColor: appColors.primary }]}
-                onPress={() => setSelectedTag(selectedTag === tag ? null : tag)}
-              >
-                <Text style={[styles.tagPillText, { color: appColors.textSecondary }, selectedTag === tag && styles.tagPillTextActive]}>{tag}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
+              {allTags.length > 0 && (
+                <Pressable
+                  style={[styles.tagPill, { backgroundColor: appColors.surface, borderColor: appColors.border }, selectedTag === null && { backgroundColor: appColors.primary, borderColor: appColors.primary }]}
+                  onPress={() => setSelectedTag(null)}
+                >
+                  <Text style={[styles.tagPillText, { color: appColors.textSecondary }, selectedTag === null && styles.tagPillTextActive]}>All</Text>
+                </Pressable>
+              )}
+              {allTags.map((tag) => (
+                <Pressable
+                  key={tag}
+                  style={[styles.tagPill, { backgroundColor: appColors.surface, borderColor: appColors.border }, selectedTag === tag && { backgroundColor: appColors.primary, borderColor: appColors.primary }]}
+                  onPress={() => setSelectedTag(selectedTag === tag ? null : tag)}
+                  onLongPress={() => {
+                    if (pinnedTags.includes(tag)) {
+                      Alert.alert("Remove tag", `Remove "${tag}" from your tags?`, [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Remove", style: "destructive", onPress: () => removePinnedTag(tag) },
+                      ]);
+                    }
+                  }}
+                >
+                  <Text style={[styles.tagPillText, { color: appColors.textSecondary }, selectedTag === tag && styles.tagPillTextActive]}>{tag}</Text>
+                </Pressable>
+              ))}
+              {showTagInput ? (
+                <View style={[styles.tagPill, { backgroundColor: appColors.surface, borderColor: appColors.primary, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10 }]}>
+                  <TextInput
+                    ref={tagInputRef}
+                    style={[styles.tagPillText, { color: appColors.textPrimary, minWidth: 64, padding: 0 }]}
+                    value={newTagValue}
+                    onChangeText={setNewTagValue}
+                    placeholder="tag name"
+                    placeholderTextColor={appColors.textTertiary}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="done"
+                    onSubmitEditing={() => {
+                      if (newTagValue.trim()) savePinnedTag(newTagValue);
+                      setNewTagValue("");
+                      setShowTagInput(false);
+                    }}
+                  />
+                  <Pressable onPress={() => { setShowTagInput(false); setNewTagValue(""); }} hitSlop={8}>
+                    <Ionicons name="close" size={14} color={appColors.textTertiary} />
+                  </Pressable>
+                </View>
+              ) : (
+                <Pressable
+                  style={[styles.tagPill, { backgroundColor: appColors.surface, borderColor: appColors.border, flexDirection: "row", alignItems: "center", gap: 4 }]}
+                  onPress={() => { setShowTagInput(true); setTimeout(() => tagInputRef.current?.focus(), 50); }}
+                >
+                  <Ionicons name="add" size={14} color={appColors.textTertiary} />
+                  <Text style={[styles.tagPillText, { color: appColors.textTertiary }]}>New</Text>
+                </Pressable>
+              )}
+            </ScrollView>
+          </>
         )}
 
         {/* Next Up Card */}
@@ -1341,6 +1560,7 @@ export default function HomeScreen() {
               task={nextTask}
               onMarkDone={() => handleMarkDone(nextTask)}
               onPress={() => handleTaskPress(nextTask)}
+              now={now}
             />
           </View>
         )}
@@ -1351,7 +1571,7 @@ export default function HomeScreen() {
             <SectionHeader
               title="Today's Schedule"
               count={todayTasks.length + todayEvents.length}
-              onViewAll={() => router.push("/(tabs)/calendar")}
+              onViewAll={() => router.push({ pathname: "/(tabs)/calendar", params: { date: format(new Date(), "yyyy-MM-dd"), view: "day" } })}
             />
             <View style={[styles.agendaWrapper, { backgroundColor: appColors.surface }]}>
               {/* Combine and sort today's items by time */}
@@ -1383,28 +1603,37 @@ export default function HomeScreen() {
                   <MaterialCommunityIcons name="chevron-right" size={16} color={appColors.primary} />
                 </Pressable>
               )}
-            </View>
-          </View>
-        )}
 
-        {/* Completed Today (TickTick-style) */}
-        {completedTodayTasks.length > 0 && (
-          <View style={styles.section}>
-            <CollapsibleSectionRefined
-              title="Completed"
-              count={completedTodayTasks.length}
-              isExpanded={completedExpanded}
-              onToggle={() => setCompletedExpanded(!completedExpanded)}
-            >
-              {completedTodayTasks.map((task) => (
-                <CompletedTaskRow
-                  key={task.id}
-                  task={task}
-                  onPress={() => handleTaskPress(task)}
-                  onUndo={() => handleUndoCompleteTask(task)}
-                />
-              ))}
-            </CollapsibleSectionRefined>
+              {/* Rest of week expand */}
+              {restOfWeekTasks.length > 0 && (
+                <>
+                  <Pressable
+                    style={[styles.restOfWeekToggle, { borderTopColor: appColors.border }]}
+                    onPress={() => setShowRestOfWeek(v => !v)}
+                  >
+                    <MaterialCommunityIcons
+                      name={showRestOfWeek ? "chevron-up" : "chevron-down"}
+                      size={15}
+                      color={appColors.textTertiary}
+                    />
+                    <Text style={[styles.restOfWeekToggleText, { color: appColors.textTertiary }]}>
+                      {showRestOfWeek ? "Hide rest of week" : `Rest of week · ${restOfWeekTasks.length} task${restOfWeekTasks.length !== 1 ? "s" : ""}`}
+                    </Text>
+                  </Pressable>
+                  {showRestOfWeek && restOfWeekTasks.map((task) => (
+                    <TaskCardRefined
+                      key={task.id}
+                      task={task}
+                      onPress={() => handleTaskPress(task)}
+                      onComplete={() => handleMarkDone(task)}
+                      onLongPress={() => handleLongPress(task)}
+                      isSelecting={isSelecting}
+                      isSelected={selectedIds.has(task.id)}
+                    />
+                  ))}
+                </>
+              )}
+            </View>
           </View>
         )}
 
@@ -1432,6 +1661,7 @@ export default function HomeScreen() {
                 >
                   <MaterialCommunityIcons name="calendar-refresh" size={14} color={appColors.primary} />
                   <Text style={[styles.rescheduleAllText, { color: appColors.primary }]}>Reschedule All</Text>
+                  {!isPro && <MaterialCommunityIcons name="lock-outline" size={13} color={appColors.primary} />}
                 </Pressable>
               </View>
               {showRescheduleAllInfo && (
@@ -1506,18 +1736,33 @@ export default function HomeScreen() {
                   </Text>
                 </View>
                 {/* Auto-reschedule toggle row */}
-                <View style={styles.missedSlotToggleRow}>
-                  <Text style={[styles.missedSlotToggleLabel, { color: isDark ? appColors.warning : "#92400E" }]}>
-                    Auto-reschedule
-                  </Text>
-                  <Switch
-                    value={autoRescheduleEnabled}
-                    onValueChange={handleToggleAutoReschedule}
-                    trackColor={{ false: isDark ? "#555" : "#d1d5db", true: `${appColors.primary}80` }}
-                    thumbColor={autoRescheduleEnabled ? appColors.primary : (isDark ? "#aaa" : "#9ca3af")}
-                    style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
-                  />
-                </View>
+                <Pressable
+                  style={styles.missedSlotToggleRow}
+                  onPress={() => !isPro && router.push({ pathname: "/paywall", params: { source: "auto_reschedule" } })}
+                >
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={[styles.missedSlotToggleLabel, { color: isDark ? appColors.warning : "#92400E" }]}>
+                      Auto-reschedule
+                    </Text>
+                    {!isPro && (
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 2, backgroundColor: appColors.aiPurple ?? "#7C6FBF", borderRadius: 6, paddingHorizontal: 5, paddingVertical: 2 }}>
+                        <MaterialCommunityIcons name="crown" size={10} color="#fff" />
+                        <Text style={{ fontSize: 10, fontWeight: "700", color: "#fff" }}>Pro</Text>
+                      </View>
+                    )}
+                  </View>
+                  {isPro ? (
+                    <Switch
+                      value={autoRescheduleEnabled}
+                      onValueChange={handleToggleAutoReschedule}
+                      trackColor={{ false: isDark ? "#555" : "#d1d5db", true: `${appColors.primary}80` }}
+                      thumbColor={autoRescheduleEnabled ? appColors.primary : (isDark ? "#aaa" : "#9ca3af")}
+                      style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
+                    />
+                  ) : (
+                    <MaterialCommunityIcons name="lock-outline" size={18} color={isDark ? appColors.warning : "#92400E"} />
+                  )}
+                </Pressable>
               </View>
             </CollapsibleSectionRefined>
           </View>
@@ -1574,6 +1819,27 @@ export default function HomeScreen() {
           </View>
         )}
 
+        {/* Completed Today */}
+        {completedTodayTasks.length > 0 && (
+          <View style={styles.section}>
+            <CollapsibleSectionRefined
+              title="Completed"
+              count={completedTodayTasks.length}
+              isExpanded={completedExpanded}
+              onToggle={() => setCompletedExpanded(!completedExpanded)}
+            >
+              {completedTodayTasks.map((task) => (
+                <CompletedTaskRow
+                  key={task.id}
+                  task={task}
+                  onPress={() => handleTaskPress(task)}
+                  onUndo={() => handleUndoCompleteTask(task)}
+                />
+              ))}
+            </CollapsibleSectionRefined>
+          </View>
+        )}
+
         {/* No Search Results State */}
         {searchQuery.trim() && parentTasks.length === 0 && tasks.length > 0 && (
           <View style={[styles.noResultsState, { backgroundColor: appColors.surface }]}>
@@ -1591,27 +1857,19 @@ export default function HomeScreen() {
         {/* Empty State */}
         {tasks.length === 0 && (
           <View style={styles.emptyState}>
-            <LinearGradient
-              colors={[appColors.secondaryLight, appColors.primaryLight]}
-              style={styles.emptyStateGradient}
-            >
+            <View style={[styles.emptyStateGradient, { backgroundColor: appColors.secondaryLight }]}>
               <MaterialCommunityIcons name="robot-outline" size={64} color={appColors.secondary} />
               <Text style={[styles.emptyStateTitle, { color: appColors.textPrimary }]}>Ready to plan your day?</Text>
               <Text style={[styles.emptyStateText, { color: appColors.textSecondary }]}>
                 Add your first task and let AI find the perfect time for it.
               </Text>
               <Pressable style={styles.emptyStateButton} onPress={() => router.push("/(tabs)/add-task")}>
-                <LinearGradient
-                  colors={[appColors.gradientStart, appColors.gradientEnd]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.emptyStateButtonGradient}
-                >
+                <View style={[styles.emptyStateButtonGradient, { backgroundColor: appColors.secondary }]}>
                   <MaterialCommunityIcons name="plus" size={20} color="#FFFFFF" />
                   <Text style={styles.emptyStateButtonText}>Create First Task</Text>
-                </LinearGradient>
+                </View>
               </Pressable>
-            </LinearGradient>
+            </View>
           </View>
         )}
 
@@ -1655,11 +1913,13 @@ export default function HomeScreen() {
           style={styles.fabWrapper}
           onPress={() => {
             if (tourStep === "tour_add_task_start") {
+              setIsManualTour(true);
               advanceTour("tour_task_title");
-              router.push("/(tabs)/add-task");
-            } else if (tourStep === "tour_add_manual") {
-              // Don't advance tour — step stays at tour_add_manual; add-task advances when create is tapped
-              router.push({ pathname: "/(tabs)/add-task", params: { tourMode: "manual" } });
+              router.push({ pathname: "/(tabs)/add-task" });
+            } else if (tourStep === "tour_add_ai") {
+              setIsManualTour(false);
+              advanceTour("tour_task_title");
+              router.push({ pathname: "/(tabs)/add-task", params: { schedulingMethod: "SMART" } });
             } else {
               setShowQuickAdd(true);
             }
@@ -1667,7 +1927,7 @@ export default function HomeScreen() {
         >
           <View style={[styles.fab, { backgroundColor: appColors.primary, shadowColor: appColors.primary }]}>
             <MaterialCommunityIcons name="plus" size={28} color="#FFFFFF" />
-            {(tourStep === "tour_add_task_start" || tourStep === "tour_add_manual") && (
+            {(tourStep === "tour_add_task_start" || tourStep === "tour_add_ai") && (
               <View style={{ position: "absolute", top: -4, right: -4 }}>
                 <TourPulseDot visible color="#FFFFFF" size={8} />
               </View>
@@ -1767,25 +2027,70 @@ export default function HomeScreen() {
 
       {/* Batch Auto-Reschedule Toast — top of screen */}
       {batchToast && (
-        <Animated.View style={[
-          styles.rescheduleToast,
-          styles.topToast,
-          { backgroundColor: appColors.surface },
-          {
-            opacity: batchToastAnim,
-            transform: [{ translateY: batchToastAnim.interpolate({ inputRange: [0, 1], outputRange: [-60, 0] }) }],
-          },
-        ]}>
-          <MaterialCommunityIcons name="lightning-bolt" size={18} color={appColors.primary} />
-          <Text style={[styles.toastText, { color: appColors.textPrimary }]} numberOfLines={1}>
-            {batchToast.count === 1
-              ? `"${batchToast.tasks[0].taskTitle}" → ${format(new Date(batchToast.tasks[0].newStart), "EEE, MMM d · h:mm a")}`
-              : `${batchToast.count} tasks auto-rescheduled`}
-          </Text>
-          <Pressable onPress={handleUndoBatchReschedule} hitSlop={8}>
-            <Text style={[styles.toastUndo, { color: appColors.primary }]}>Undo</Text>
+        <Pressable style={{ position: "absolute", top: 60, left: 12, right: 12, zIndex: 100 }} onPress={() => setShowRescheduleReview(true)}>
+          <Animated.View style={[
+            styles.rescheduleToast,
+            { position: "relative", bottom: undefined, backgroundColor: appColors.surface },
+            {
+              opacity: batchToastAnim,
+              transform: [{ translateY: batchToastAnim.interpolate({ inputRange: [0, 1], outputRange: [-60, 0] }) }],
+            },
+          ]}>
+            <MaterialCommunityIcons name="lightning-bolt" size={18} color={appColors.primary} />
+            <Text style={[styles.toastText, { color: appColors.textPrimary }]} numberOfLines={1}>
+              {batchToast.count === 1
+                ? `"${batchToast.tasks[0].taskTitle}" rescheduled`
+                : `${batchToast.count} tasks auto-rescheduled`}
+            </Text>
+            <Text style={[styles.toastUndo, { color: appColors.primary }]}>Review</Text>
+          </Animated.View>
+        </Pressable>
+      )}
+
+      {/* Per-task reschedule review sheet */}
+      {showRescheduleReview && batchToast && (
+        <Pressable
+          style={{ position: "absolute", inset: 0, backgroundColor: "rgba(0,0,0,0.4)" }}
+          onPress={() => setShowRescheduleReview(false)}
+        >
+          <Pressable
+            style={[styles.reviewSheet, { backgroundColor: appColors.background }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.reviewSheetHandle} />
+            <Text style={[styles.reviewSheetTitle, { color: appColors.textPrimary }]}>
+              Auto-rescheduled tasks
+            </Text>
+            <Text style={[styles.reviewSheetSubtitle, { color: appColors.textSecondary }]}>
+              AI moved these to better fit your schedule. Undo any you want to revert.
+            </Text>
+            {batchToast.tasks.map((t) => (
+              <View key={t.taskId} style={[styles.reviewSheetRow, { borderBottomColor: appColors.border }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.reviewSheetTaskTitle, { color: appColors.textPrimary }]} numberOfLines={1}>
+                    {t.taskTitle}
+                  </Text>
+                  <Text style={[styles.reviewSheetTaskTime, { color: appColors.textSecondary }]}>
+                    → {format(new Date(t.newStart), "EEE, MMM d · h:mm a")}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => handleUndoSingleRescheduled(t.taskId)}
+                  style={[styles.reviewUndoBtn, { borderColor: appColors.border }]}
+                  hitSlop={8}
+                >
+                  <Text style={[styles.reviewUndoBtnText, { color: appColors.textPrimary }]}>Undo</Text>
+                </Pressable>
+              </View>
+            ))}
+            <Pressable
+              style={[styles.reviewKeepBtn, { backgroundColor: appColors.primary }]}
+              onPress={() => { setShowRescheduleReview(false); hideBatchToast(); }}
+            >
+              <Text style={styles.reviewKeepBtnText}>Keep all</Text>
+            </Pressable>
           </Pressable>
-        </Animated.View>
+        </Pressable>
       )}
 
       {/* Complete Task Undo Toast */}
@@ -1816,6 +2121,75 @@ export default function HomeScreen() {
         title="Welcome!"
         body="Let me give you a 2-minute tour of DayWise."
         ctaLabel="Show me around"
+        onCta={() => {
+          console.log("[Tour] tour_welcome CTA tapped, scrollRef:", !!scrollViewRef.current);
+          scrollViewRef.current?.scrollTo({ y: 320, animated: true });
+          setTimeout(() => advanceTour("tour_demo_tasks"), 800);
+        }}
+        onSkip={skipTour}
+        showSkip
+      />
+      <TourTooltip
+        visible={tourStep === "tour_demo_tasks"}
+        icon="clipboard-list-outline"
+        iconColor={appColors.primary}
+        title="We've set up tomorrow"
+        body="These tasks are already on your schedule for tomorrow. Think of them as the stuff you already have planned. You can complete or delete them anytime."
+        ctaLabel="Got it"
+        onCta={() => advanceTour("tour_priority_hint")}
+        onSkip={skipTour}
+        showSkip
+        position="top"
+      />
+      <TourTooltip
+        visible={tourStep === "tour_priority_hint"}
+        icon="flag"
+        iconColor={appColors.priorityHigh}
+        title="Flag = priority"
+        body={
+          <View style={{ gap: 8 }}>
+            <Text style={{ fontSize: 14, color: appColors.textSecondary, marginBottom: 4 }}>A small flag next to the time shows how important a task is:</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <MaterialCommunityIcons name="flag" size={14} color={appColors.priorityHigh} />
+              <Text style={{ fontSize: 14, color: appColors.textSecondary }}>High priority</Text>
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <MaterialCommunityIcons name="flag" size={14} color={appColors.priorityMedium} />
+              <Text style={{ fontSize: 14, color: appColors.textSecondary }}>Medium priority</Text>
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <MaterialCommunityIcons name="minus" size={14} color={appColors.textTertiary} />
+              <Text style={{ fontSize: 14, color: appColors.textSecondary }}>Low priority — no flag</Text>
+            </View>
+          </View>
+        }
+        ctaLabel="Got it"
+        onCta={() => advanceTour("tour_scheduling_intro")}
+        onSkip={skipTour}
+        showSkip
+        position="top"
+      />
+      <TourTooltip
+        visible={tourStep === "tour_scheduling_intro"}
+        icon="lightning-bolt"
+        iconColor={appColors.primary}
+        title="Two ways to schedule"
+        body=""
+        pages={[
+          {
+            icon: "brain",
+            iconColor: appColors.secondary,
+            title: "AI Scheduling",
+            body: "Give me a task and a deadline — I'll find your best slot. No thinking needed.",
+          },
+          {
+            icon: "cursor-default-click-outline",
+            iconColor: appColors.primary,
+            title: "Manual Scheduling",
+            body: "You pick the exact time, I block it. Full control.\n\nWe'll try both right now.",
+          },
+        ]}
+        ctaLabel="Got it"
         onCta={() => advanceTour("tour_add_task_start")}
         onSkip={skipTour}
         showSkip
@@ -1824,12 +2198,13 @@ export default function HomeScreen() {
         visible={tourStep === "tour_add_task_start"}
         icon="plus-circle"
         iconColor={appColors.primary}
-        title="Create your first task"
-        body="Tap the + button above to open the task creator. We'll build your first AI-scheduled task together."
+        title="Add your first task"
+        body="Tap + to create a task. You'll pick the exact time yourself — no AI yet."
         ctaLabel="Open task creator"
         onCta={() => {
+          setIsManualTour(true);
           advanceTour("tour_task_title");
-          router.push("/(tabs)/add-task");
+          router.push({ pathname: "/(tabs)/add-task" });
         }}
         onSkip={skipTour}
         showSkip
@@ -1847,15 +2222,16 @@ export default function HomeScreen() {
         showSkip
       />
       <TourTooltip
-        visible={tourStep === "tour_add_manual"}
-        icon="gesture-tap"
-        iconColor={appColors.secondary}
-        title="Now schedule yourself"
-        body="Tap the + button above to create another task. This time you'll pick your own time slot."
+        visible={tourStep === "tour_add_ai"}
+        icon="star-four-points"
+        iconColor={appColors.aiPurple ?? appColors.secondary}
+        title="Now let AI find your time"
+        body="Tap + to add another task. This time set a deadline — I'll find the best open slot around everything already there."
         ctaLabel="Open task creator"
         onCta={() => {
-          // Don't advance tour step — add-task screen handles advance when task is created
-          router.push({ pathname: "/(tabs)/add-task", params: { tourMode: "manual" } });
+          setIsManualTour(false);
+          advanceTour("tour_task_title");
+          router.push({ pathname: "/(tabs)/add-task", params: { schedulingMethod: "SMART" } });
         }}
         onSkip={skipTour}
         showSkip
@@ -1876,26 +2252,10 @@ export default function HomeScreen() {
         visible={tourStep === "tour_manual_done"}
         icon="arm-flex-outline"
         iconColor={appColors.success}
-        title="You're in full control"
-        body="Use AI for the best slot, or manual when you know exactly when."
-        ctaLabel="See your schedule"
-        onCta={() => {
-          advanceTour("tour_go_calendar");
-        }}
-        onSkip={skipTour}
-        showSkip
-      />
-      <TourTooltip
-        visible={tourStep === "tour_go_calendar"}
-        icon="calendar-month-outline"
-        iconColor={appColors.primary}
-        title="See your full schedule"
-        body="Tap the Calendar tab to see all tasks laid out by time."
-        ctaLabel="Go to Calendar"
-        onCta={() => {
-          advanceTour("tour_calendar_intro");
-          router.push("/(tabs)/calendar");
-        }}
+        title="That's manual scheduling"
+        body="You found the gap yourself. Now watch what happens when AI does it."
+        ctaLabel="Try AI scheduling"
+        onCta={() => advanceTour("tour_add_ai")}
         onSkip={skipTour}
         showSkip
       />
@@ -1930,124 +2290,93 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
   },
 
-  // Welcome Card - Warm with accurate progress bar
+  // Search trigger pill
+  searchTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginHorizontal: 20,
+    marginTop: 10,
+  },
+  searchTriggerText: {
+    fontSize: 13,
+    fontWeight: "400",
+  },
+
+  // Welcome Header — compact strip
   welcomeCardWrapper: {
     marginHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  welcomeCard: {
-    borderRadius: 20,
-    padding: 20,
-    overflow: "hidden",
+    marginTop: 14,
+    marginBottom: 4,
   },
   welcomeTop: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 20,
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  welcomeNameRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
   },
   welcomeGreeting: {
-    fontSize: 15,
-    fontWeight: "500",
-    color: "#92854C",
+    fontSize: 16,
+    fontWeight: "400",
   },
   welcomeName: {
-    fontSize: 28,
+    fontSize: 18,
     fontWeight: "700",
-    color: "#1A1D23",
-    letterSpacing: -0.5,
+    letterSpacing: -0.2,
   },
   welcomeDate: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#92854C",
-    backgroundColor: "rgba(255,255,255,0.6)",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
+    fontSize: 14,
+    fontWeight: "500",
   },
-  welcomeProgressSection: {
-    marginBottom: 20,
-  },
-  welcomeProgressHeader: {
+  welcomeProgressRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 10,
-  },
-  welcomeMotivation: {
-    fontSize: 15,
-    color: "#5C5030",
-    fontWeight: "600",
-  },
-  welcomeProgressPercent: {
-    fontSize: 22,
-    fontWeight: "700",
-    color: "#D4A84B",
+    gap: 10,
   },
   welcomeProgressTrack: {
-    height: 10,
-    backgroundColor: "#EDE5CC",
-    borderRadius: 5,
+    flex: 1,
+    height: 4,
+    borderRadius: 2,
     overflow: "hidden",
   },
   welcomeProgressFill: {
     height: "100%",
-    backgroundColor: "#D4A84B",
-    borderRadius: 5,
+    borderRadius: 2,
   },
-  welcomeProgressDetail: {
-    fontSize: 12,
-    color: "#92854C",
-    marginTop: 6,
-  },
-  welcomeStatsRow: {
-    flexDirection: "row",
-    backgroundColor: "rgba(255,255,255,0.5)",
-    borderRadius: 12,
-    padding: 4,
-  },
-  welcomeStatChip: {
-    flex: 1,
-    alignItems: "center",
-    paddingVertical: 8,
-  },
-  welcomeStatChipNumber: {
-    fontSize: 20,
+  welcomeProgressFraction: {
+    fontSize: 15,
     fontWeight: "700",
-    color: "#1A1D23",
+    minWidth: 32,
+    textAlign: "right",
   },
-  welcomeStatChipLabel: {
-    fontSize: 11,
-    color: "#92854C",
-    marginTop: 2,
+  welcomeProgressTotal: {
+    fontSize: 14,
+    fontWeight: "400",
   },
 
   // Search Bar
   searchBarWrapper: {
     paddingHorizontal: 20,
-    marginTop: 16,
+    marginTop: 10,
   },
   searchBar: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.surface,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 4,
-    elevation: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
   searchIcon: {
-    marginRight: 10,
+    marginRight: 8,
   },
   searchInput: {
     flex: 1,
-    fontSize: 15,
+    fontSize: 14,
     color: COLORS.textPrimary,
     padding: 0,
   },
@@ -2126,84 +2455,78 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
 
-  // Next Up Card
+  // Next Up Card — compact strip
   nextUpWrapper: {
-    marginBottom: 8,
+    marginBottom: 6,
   },
   nextUpCard: {
-    borderRadius: 20,
+    borderRadius: 12,
     overflow: "hidden",
     flexDirection: "row",
   },
-  nextUpIndicator: {
-    width: 4,
-  },
   nextUpContent: {
     flex: 1,
-    padding: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   nextUpHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 10,
+    marginBottom: 4,
   },
   nextUpLabelRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 4,
   },
   nextUpLabel: {
     fontSize: 11,
     fontWeight: "700",
-    letterSpacing: 0.8,
+    letterSpacing: 0.6,
     textTransform: "uppercase",
   },
   nextUpTime: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "600",
   },
+  nextUpBottomRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
   nextUpTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 6,
-    letterSpacing: -0.3,
+    fontSize: 16,
+    fontWeight: "600",
+    letterSpacing: -0.2,
+    marginBottom: 2,
   },
   nextUpSchedule: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "500",
-    marginBottom: 12,
   },
   nextUpProgress: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 14,
-    gap: 10,
+    marginTop: 4,
   },
   progressBar: {
-    flex: 1,
-    height: 6,
-    borderRadius: 3,
+    height: 3,
+    borderRadius: 2,
   },
   progressText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "600",
-    minWidth: 35,
-  },
-  nextUpActions: {
-    flexDirection: "row",
-    gap: 10,
   },
   nextUpButton: {
-    flexDirection: "row",
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 12,
+    justifyContent: "center",
   },
   nextUpButtonText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "600",
     color: "#FFFFFF",
   },
@@ -2394,7 +2717,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#F0F9FF",
   },
   agendaTimeCol: {
-    width: 60,
+    width: 72,
     marginRight: 12,
   },
   agendaTimeColActive: {},
@@ -2437,6 +2760,62 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     padding: 4,
   },
+  // New title-first task row styles
+  taskRowItem: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    minHeight: 56,
+  },
+  taskRowContent: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  taskRowTitleRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+  },
+  taskRowTitle: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: "500",
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+    marginBottom: 3,
+  },
+  taskRowCheck: {
+    marginLeft: 8,
+    padding: 2,
+    alignSelf: "flex-start",
+  },
+  taskRowMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+  },
+  taskRowMetaText: {
+    fontSize: 12,
+    color: COLORS.textTertiary,
+  },
+  taskRowMetaDot: {
+    fontSize: 12,
+    color: COLORS.textTertiary,
+  },
+  taskRowReschedule: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 10,
+    marginLeft: 8,
+  },
+  taskRowRescheduleText: {
+    fontSize: 11,
+    fontWeight: "500",
+    color: COLORS.textSecondary,
+  },
   agendaEventBadge: {
     flexDirection: "row",
     alignItems: "center",
@@ -2457,6 +2836,26 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "500",
     color: COLORS.primary,
+  },
+  sectionFadeDivider: {
+    height: 1,
+    marginHorizontal: 16,
+    marginTop: 14,
+    marginBottom: 4,
+    opacity: 0.6,
+  },
+  restOfWeekToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 10,
+    gap: 5,
+    borderTopWidth: 1,
+  },
+  restOfWeekToggleText: {
+    fontSize: 12,
+    fontWeight: "500",
+    color: COLORS.textTertiary,
   },
 
   // Empty States
@@ -2739,16 +3138,11 @@ const styles = StyleSheet.create({
     bottom: 16,
     left: 12,
     right: 12,
-  },
-  topToast: {
-    bottom: undefined,
-    top: 60,
-    left: 12,
-    right: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    padding: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     borderRadius: 12,
     elevation: 8,
     shadowColor: "#000",
@@ -2756,12 +3150,86 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
   },
+  topToast: {
+    bottom: undefined,
+    top: 60,
+  },
   toastText: {
     flex: 1,
     fontSize: 13,
   },
   toastUndo: {
     fontSize: 13,
+    fontWeight: "600",
+  },
+
+  reviewSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    paddingBottom: 36,
+    elevation: 16,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -4 },
+  },
+  reviewSheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#ccc",
+    alignSelf: "center",
+    marginBottom: 16,
+  },
+  reviewSheetTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    marginBottom: 4,
+  },
+  reviewSheetSubtitle: {
+    fontSize: 13,
+    marginBottom: 16,
+    lineHeight: 18,
+  },
+  reviewSheetRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  reviewSheetTaskTitle: {
+    fontSize: 14,
+    fontWeight: "500",
+    marginBottom: 2,
+  },
+  reviewSheetTaskTime: {
+    fontSize: 12,
+  },
+  reviewUndoBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  reviewUndoBtnText: {
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  reviewKeepBtn: {
+    marginTop: 16,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  reviewKeepBtnText: {
+    color: "#fff",
+    fontSize: 15,
     fontWeight: "600",
   },
 
@@ -2907,5 +3375,27 @@ const styles = StyleSheet.create({
   calendarHintDismiss: {
     fontSize: 16,
     paddingLeft: 12,
+  },
+
+  // Trial banner
+  trialBanner: {
+    marginHorizontal: 20,
+    marginBottom: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  trialBannerText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  trialBannerCta: {
+    fontSize: 13,
+    fontWeight: "700",
   },
 });

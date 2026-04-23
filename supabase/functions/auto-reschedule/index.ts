@@ -44,15 +44,16 @@ interface PersonalityData {
     start: string;
     end: string;
   }>;
-  auto_reschedule_enabled?: boolean;    // Default: true
-  auto_reschedule_morning?: number;     // Hour 0-23 in user's local time, default 9
-  auto_reschedule_evening?: number;     // Hour 0-23 in user's local time, default 19
-  auto_reschedule_tz_offset?: number;   // UTC offset in hours (e.g. -5 for EST)
 }
 
 interface UserProfile {
   id: string;
   personality_data: PersonalityData | null;
+  auto_reschedule_enabled: boolean;
+  auto_reschedule_morning: number;
+  auto_reschedule_evening: number;
+  auto_reschedule_tz_name: string | null;
+  auto_reschedule_tz_offset: number | null;
 }
 
 interface CalendarEvent {
@@ -70,6 +71,34 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+// ─── Timezone-aware date helpers ──────────────────────────────────────────────
+// Deno runs in UTC. All helper functions below accept a tzOffsetMs so that
+// slot generation respects the USER's local calendar (day-of-week, work hours).
+
+/** UTC midnight for the given date, expressed in the user's local calendar day */
+function localDayStart(utcDate: Date, tzOffsetMs: number): Date {
+  const local = new Date(utcDate.getTime() + tzOffsetMs);
+  local.setUTCHours(0, 0, 0, 0);
+  return new Date(local.getTime() - tzOffsetMs);
+}
+
+/** Day-of-week (0=Sun … 6=Sat) in the user's local timezone */
+function localDayOfWeek(utcDate: Date, tzOffsetMs: number): number {
+  return new Date(utcDate.getTime() + tzOffsetMs).getUTCDay();
+}
+
+/** Hour (0-23) in the user's local timezone */
+function localHour(utcDate: Date, tzOffsetMs: number): number {
+  return new Date(utcDate.getTime() + tzOffsetMs).getUTCHours();
+}
+
+/** Return a Date representing `baseDate` at the given local hours:minutes */
+function setLocalHours(baseDate: Date, hours: number, minutes: number, tzOffsetMs: number): Date {
+  const local = new Date(baseDate.getTime() + tzOffsetMs);
+  local.setUTCHours(hours, minutes, 0, 0);
+  return new Date(local.getTime() - tzOffsetMs);
+}
 
 // Default personality values
 const DEFAULT_PERSONALITY: PersonalityData = {
@@ -92,6 +121,18 @@ Deno.serve(async (req) => {
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // Verify cron secret — prevents unauthenticated callers from triggering reschedules
+  const cronSecret = Deno.env.get("CRON_SECRET");
+  if (cronSecret) {
+    const authHeader = req.headers.get("Authorization");
+    if (authHeader !== `Bearer ${cronSecret}`) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
   }
 
   try {
@@ -154,28 +195,45 @@ Deno.serve(async (req) => {
         // Get user profile for scheduling preferences
         const { data: profile } = await supabase
           .from("user_profiles")
-          .select("id, personality_data")
+          .select("id, personality_data, auto_reschedule_enabled, auto_reschedule_morning, auto_reschedule_evening, auto_reschedule_tz_name, auto_reschedule_tz_offset")
           .eq("id", task.user_id)
           .single();
 
         // Check if auto-reschedule is enabled for this user
-        const pd = profile?.personality_data;
-        if (pd?.auto_reschedule_enabled === false) {
+        if (profile?.auto_reschedule_enabled === false) {
           console.log(`[auto-reschedule] Skipping task ${task.id}: auto-reschedule disabled by user`);
           results.push({ taskId: task.id, success: false, error: "Auto-reschedule disabled" });
           continue;
         }
 
-        // Convert current UTC time to user's local minutes-from-midnight
-        const tzOffset = pd?.auto_reschedule_tz_offset ?? 0;
-        const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-        const userLocalMinutes = ((utcMinutes + tzOffset * 60) % (24 * 60) + 24 * 60) % (24 * 60);
+        // Convert UTC to user's local minutes-from-midnight.
+        // Prefer IANA timezone name (DST-aware). Fall back to numeric offset.
+        const tzName = profile?.auto_reschedule_tz_name;
+        let userLocalMinutes: number;
+        if (tzName) {
+          try {
+            const parts = new Intl.DateTimeFormat("en-US", {
+              timeZone: tzName,
+              hour: "numeric",
+              minute: "numeric",
+              hour12: false,
+            }).formatToParts(now);
+            const h = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0");
+            const m = parseInt(parts.find((p) => p.type === "minute")?.value ?? "0");
+            userLocalMinutes = (h === 24 ? 0 : h) * 60 + m;
+          } catch {
+            const offset = profile?.auto_reschedule_tz_offset ?? 0;
+            const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+            userLocalMinutes = ((utcMin + offset * 60) % (24 * 60) + 24 * 60) % (24 * 60);
+          }
+        } else {
+          const offset = profile?.auto_reschedule_tz_offset ?? 0;
+          const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+          userLocalMinutes = ((utcMin + offset * 60) % (24 * 60) + 24 * 60) % (24 * 60);
+        }
 
-        // Stored as minutes from midnight; migrate old hour values (< 24) on the fly
-        const rawMorning = pd?.auto_reschedule_morning ?? 540;
-        const rawEvening = pd?.auto_reschedule_evening ?? 1140;
-        const morningMinutes = rawMorning < 24 ? rawMorning * 60 : rawMorning;
-        const eveningMinutes = rawEvening < 24 ? rawEvening * 60 : rawEvening;
+        const morningMinutes = profile?.auto_reschedule_morning ?? 540;
+        const eveningMinutes = profile?.auto_reschedule_evening ?? 1140;
 
         // Allow a 59-minute window around each configured time (cron runs hourly)
         const nearMorning = userLocalMinutes >= morningMinutes && userLocalMinutes < morningMinutes + 60;
@@ -202,12 +260,20 @@ Deno.serve(async (req) => {
           .eq("user_id", task.user_id)
           .gte("end_time", now.toISOString());
 
+        // Derive tzOffsetMs from already-computed userLocalMinutes (DST-aware)
+        const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+        let diffMin = userLocalMinutes - utcMinutes;
+        if (diffMin > 840) diffMin -= 1440;   // handle UTC+14 edge
+        if (diffMin < -720) diffMin += 1440;  // handle UTC-12 edge
+        const tzOffsetMs = diffMin * 60 * 1000;
+
         // Find BEST available slot using personality-aware algorithm
         const bestSlot = findBestAvailableSlot(
           task,
           profile as UserProfile | null,
           existingTasks || [],
-          calendarEvents || []
+          calendarEvents || [],
+          tzOffsetMs
         );
 
         if (!bestSlot) {
@@ -324,7 +390,8 @@ function findBestAvailableSlot(
   task: Task,
   profile: UserProfile | null,
   existingTasks: Array<{ id: string; scheduled_start: string | null; scheduled_end: string | null; priority: string }>,
-  calendarEvents: CalendarEvent[]
+  calendarEvents: CalendarEvent[],
+  tzOffsetMs: number = 0
 ): ScoredSlot | null {
   const now = new Date();
   const personality = profile?.personality_data || DEFAULT_PERSONALITY;
@@ -365,10 +432,9 @@ function findBestAvailableSlot(
   }
 
   for (let dayOffset = 0; dayOffset < lookAheadDays; dayOffset++) {
-    const checkDate = new Date(now);
-    checkDate.setDate(checkDate.getDate() + dayOffset);
-    checkDate.setHours(0, 0, 0, 0);
-    const dayOfWeek = checkDate.getDay();
+    // localDayStart gives us UTC midnight aligned to the USER's local calendar day
+    const checkDate = localDayStart(new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000), tzOffsetMs);
+    const dayOfWeek = localDayOfWeek(checkDate, tzOffsetMs);
 
     // Convert Sunday = 0 to our format (Monday = 1)
     const dayNum = dayOfWeek === 0 ? 7 : dayOfWeek;
@@ -377,15 +443,12 @@ function findBestAvailableSlot(
     const window = preferredWindows.find((w) => w.day === dayNum);
     if (!window) continue;
 
-    // Parse window times
+    // Parse window times (stored as local hours — convert to UTC using tzOffsetMs)
     const [startH, startM] = window.start.split(":").map(Number);
     const [endH, endM] = window.end.split(":").map(Number);
 
-    const windowStart = new Date(checkDate);
-    windowStart.setHours(startH, startM, 0, 0);
-
-    const windowEnd = new Date(checkDate);
-    windowEnd.setHours(endH, endM, 0, 0);
+    const windowStart = setLocalHours(checkDate, startH, startM, tzOffsetMs);
+    const windowEnd = setLocalHours(checkDate, endH, endM, tzOffsetMs);
 
     // If checking today, start from now (or window start, whichever is later)
     const slotSearchStart = dayOffset === 0
@@ -419,7 +482,8 @@ function findBestAvailableSlot(
           candidateStart,
           task,
           personality,
-          existingTasks
+          existingTasks,
+          tzOffsetMs
         );
 
         candidates.push({
@@ -454,11 +518,12 @@ function calculateSlotScore(
   slotStart: Date,
   task: Task,
   personality: PersonalityData,
-  existingTasks: Array<{ id: string; scheduled_start: string | null; scheduled_end: string | null; priority: string }>
+  existingTasks: Array<{ id: string; scheduled_start: string | null; scheduled_end: string | null; priority: string }>,
+  tzOffsetMs: number = 0
 ): number {
   let score = 100;
-  const hour = slotStart.getHours();
-  const dayOfWeek = slotStart.getDay();
+  const hour = localHour(slotStart, tzOffsetMs);
+  const dayOfWeek = localDayOfWeek(slotStart, tzOffsetMs);
 
   // 1. Chronotype filter
   score += applyChronotypeFilter(personality, hour);

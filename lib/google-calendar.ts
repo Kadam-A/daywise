@@ -15,6 +15,7 @@ import Constants from "expo-constants";
 import { Platform } from "react-native";
 import { GoogleCalendarTokens, GoogleCalendarEvent, CalendarEvent } from "./types";
 import { supabase } from "./supabase";
+import { trackCalendarSynced, trackCalendarSyncFailed } from "./analytics";
 
 // Check if running in Expo Go
 const isExpoGo = Constants.appOwnership === "expo";
@@ -132,10 +133,14 @@ export function useGoogleCalendarAuth() {
     ? AuthSession.makeRedirectUri({ path: "oauth" })
     : AuthSession.makeRedirectUri({ scheme: "daywise", path: "oauth" });
 
-  // Debug: Log the redirect URI being used
-  console.log("[GoogleCalendar] Running in Expo Go:", isExpoGo);
-  console.log("[GoogleCalendar] Client ID:", clientId ? "SET" : "MISSING!");
-  console.log("[GoogleCalendar] Redirect URI:", redirectUri);
+  // Debug: log once on mount only
+  useEffect(() => {
+    if (__DEV__) {
+      console.log("[GoogleCalendar] Running in Expo Go:", isExpoGo);
+      console.log("[GoogleCalendar] Client ID:", clientId ? "SET" : "MISSING!");
+      console.log("[GoogleCalendar] Redirect URI:", redirectUri);
+    }
+  }, []);
 
   // Create the auth request with PKCE
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
@@ -475,9 +480,11 @@ export async function fetchGoogleCalendarEvents(
     }
 
     console.log(`[fetchGoogleCalendarEvents] Synced ${calendarEvents.length} events`);
+    trackCalendarSynced(calendarEvents.length); // fire-and-forget
     return dbEvents || [];
   } catch (error) {
     console.error("[fetchGoogleCalendarEvents]", error);
+    trackCalendarSyncFailed(error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

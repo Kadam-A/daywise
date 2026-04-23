@@ -2,10 +2,10 @@
  * TourRewardModal
  *
  * Full blocking overlay shown after first AI-scheduled task.
- * Confetti animation + AI usage visual bar.
+ * Confetti animation + tip about due dates.
  */
 
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import {
   View,
   StyleSheet,
@@ -19,7 +19,7 @@ import { Text } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAppColors } from '@/contexts/ThemeContext';
 
-// ─── Confetti (32 particles, same pattern as onboarding.tsx) ──────────────────
+// ─── Confetti ─────────────────────────────────────────────────────────────────
 
 const CONFETTI_COLORS = ['#4A90E2', '#7C6FBF', '#5FBF73', '#F5A962', '#E25555', '#F472B6'];
 
@@ -80,44 +80,43 @@ export default function TourRewardModal({ visible, onCta }: TourRewardModalProps
       animationType="fade"
       statusBarTranslucent
     >
-      <View style={[styles.overlay, { backgroundColor: 'rgba(0,0,0,0.6)' }]}>
+      <View style={[styles.overlay, { backgroundColor: 'rgba(0,0,0,0.65)' }]}>
         <Confetti />
         <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-          {/* Large gift icon */}
-          <View style={[styles.iconCircle, { backgroundColor: `${appColors.primary}20` }]}>
-            <MaterialCommunityIcons name="gift" size={52} color={appColors.primary} />
+
+          {/* Purple accent bar at top */}
+          <View style={[styles.accentBar, { backgroundColor: appColors.secondary }]} />
+
+          {/* Icon */}
+          <View style={styles.iconWrapper}>
+            <View style={[styles.iconRing, { borderColor: `${appColors.secondary}30` }]}>
+              <View style={[styles.iconCircle, { backgroundColor: `${appColors.secondary}18` }]}>
+                <MaterialCommunityIcons name="brain" size={48} color={appColors.secondary} />
+              </View>
+            </View>
           </View>
 
           <Text style={[styles.headline, { color: appColors.textPrimary }]}>
-            AI schedule used!
+            Task scheduled!
           </Text>
           <Text style={[styles.sub, { color: appColors.textSecondary }]}>
-            Your AI credits recharge throughout the day. You have plenty more to go.
+            Always set a due date when adding tasks. The AI uses it to prioritise your day and make sure nothing slips through.
           </Text>
 
-          {/* 3/3 filled circles visual bar */}
-          <View style={styles.creditRow}>
-            {[0, 1, 2].map((i) => (
-              <View
-                key={i}
-                style={[
-                  styles.creditDot,
-                  { backgroundColor: appColors.success, borderColor: appColors.success },
-                ]}
-              >
-                <MaterialCommunityIcons name="check" size={14} color="#FFFFFF" />
-              </View>
-            ))}
+          {/* Tip row with left accent border */}
+          <View style={[styles.tipRow, { backgroundColor: `${appColors.secondary}10`, borderLeftColor: appColors.secondary }]}>
+            <MaterialCommunityIcons name="lightbulb-outline" size={16} color={appColors.secondary} />
+            <Text style={[styles.tipText, { color: appColors.textSecondary }]}>
+              Tighter deadlines = higher priority in your schedule
+            </Text>
           </View>
-          <Text style={[styles.creditLabel, { color: appColors.textTertiary }]}>
-            3/3 AI schedules — recharged
-          </Text>
 
           <Pressable
-            style={[styles.ctaButton, { backgroundColor: appColors.primary }]}
+            style={[styles.ctaButton, { backgroundColor: appColors.secondary }]}
             onPress={onCta}
           >
-            <Text style={styles.ctaLabel}>Got it — keep going</Text>
+            <MaterialCommunityIcons name="arrow-right" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+            <Text style={styles.ctaLabel}>Got it, keep going</Text>
           </Pressable>
         </View>
       </View>
@@ -134,62 +133,82 @@ const styles = StyleSheet.create({
   },
   card: {
     borderRadius: 24,
-    padding: 28,
     alignItems: 'center',
     width: '100%',
     maxWidth: 360,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 16,
-    elevation: 8,
+    overflow: 'hidden',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    elevation: 12,
+    paddingBottom: 28,
   },
-  iconCircle: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
+  accentBar: {
+    height: 4,
+    alignSelf: 'stretch',
+    marginBottom: 28,
+  },
+  iconWrapper: {
+    marginBottom: 20,
+  },
+  iconRing: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 20,
+  },
+  iconCircle: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   headline: {
     fontSize: 24,
     fontWeight: '800',
     textAlign: 'center',
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -0.3,
   },
   sub: {
-    fontSize: 15,
+    fontSize: 14,
     textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: 24,
+    lineHeight: 21,
+    marginBottom: 20,
+    paddingHorizontal: 28,
   },
-  creditRow: {
+  tipRow: {
     flexDirection: 'row',
-    gap: 12,
-    marginBottom: 8,
-  },
-  creditDot: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    borderWidth: 2,
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 10,
+    borderLeftWidth: 3,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 24,
+    marginHorizontal: 28,
+    alignSelf: 'stretch',
   },
-  creditLabel: {
+  tipText: {
+    flex: 1,
     fontSize: 13,
-    marginBottom: 28,
+    lineHeight: 18,
   },
   ctaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 14,
     paddingVertical: 14,
-    paddingHorizontal: 32,
+    marginHorizontal: 28,
     alignSelf: 'stretch',
-    alignItems: 'center',
   },
   ctaLabel: {
     color: '#FFFFFF',
     fontWeight: '700',
-    fontSize: 16,
+    fontSize: 15,
   },
 });

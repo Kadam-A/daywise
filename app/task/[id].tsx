@@ -8,7 +8,7 @@
  * - Delete
  */
 
-import { View, StyleSheet, ScrollView, Alert, Pressable, Animated, KeyboardAvoidingView, Platform } from "react-native";
+import { View, StyleSheet, ScrollView, Alert, Pressable, Animated, KeyboardAvoidingView, Platform, Keyboard } from "react-native";
 import {
   Text,
   Button,
@@ -22,7 +22,7 @@ import {
   TextInput,
   useTheme,
 } from "react-native-paper";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -46,8 +46,10 @@ import {
 } from "@/lib/recurrence";
 import { useNetwork } from "@/contexts/NetworkContext";
 import { useAppColors } from "@/contexts/ThemeContext";
+import { useSubscription } from "@/contexts/SubscriptionContext";
 import { queueOperation } from "@/lib/offline";
-import { trackTaskCompleted, trackFeedbackSkipped } from "@/lib/analytics";
+import { trackTaskCompleted, trackTaskDeleted, trackTaskRescheduled } from "@/lib/analytics";
+import { trackFeedbackSkipped } from "@/lib/feedback";
 import {
   incrementCompletedTaskCount,
   checkHappinessFlowEligibility,
@@ -81,11 +83,26 @@ const COLORS = {
   aiPurpleLight: "#F3F0FF",
 };
 
+const DURATION_PRESETS = [
+  { value: "15", label: "15m" },
+  { value: "30", label: "30m" },
+  { value: "60", label: "1h" },
+  { value: "120", label: "2h" },
+];
+
+const PRIORITY_OPTIONS = [
+  { value: "low", label: "Low", icon: "flag-outline" },
+  { value: "medium", label: "Medium", icon: "flag" },
+  { value: "high", label: "High", icon: "flag-variant" },
+];
+
 export default function TaskDetailScreen() {
   const { colors } = useTheme();
   const appColors = useAppColors();
+  const insets = useSafeAreaInsets();
   const { id, reschedule } = useLocalSearchParams<{ id: string; reschedule?: string }>();
   const { isConnected } = useNetwork();
+  const { isPro } = useSubscription();
 
   // Navigate back to home
   const goBack = () => {
@@ -109,6 +126,11 @@ export default function TaskDetailScreen() {
   const [editSchedulingMethod, setEditSchedulingMethod] = useState<"SMART" | "MANUAL">("SMART");
   const [existingTags, setExistingTags] = useState<string[]>([]);
   const [saveLoading, setSaveLoading] = useState(false);
+  const [expandedEditField, setExpandedEditField] = useState<string | null>(null);
+  const toggleEditField = (field: string) => {
+    if (expandedEditField === field) Keyboard.dismiss();
+    setExpandedEditField(prev => prev === field ? null : field);
+  };
   const scrollViewRef = useRef<ScrollView>(null);
 
   // Subtask state
@@ -252,11 +274,6 @@ export default function TaskDetailScreen() {
   const saveEdits = async () => {
     if (!task || !editTitle.trim()) return;
 
-    if (!editDueDate) {
-      Alert.alert("Due Date Required", "Every task needs a due date for scheduling");
-      return;
-    }
-
     const durationNum = parseInt(editDuration);
     if (isNaN(durationNum) || durationNum < 5 || durationNum > 480) {
       Alert.alert("Invalid Duration", "Duration must be between 5 and 480 minutes");
@@ -266,7 +283,13 @@ export default function TaskDetailScreen() {
     try {
       setSaveLoading(true);
 
-      const { data: updatedTask, error } = await supabase
+      // Recalculate scheduled_end if task is already scheduled so the time block
+      // matches the new duration immediately without needing a reschedule
+      const newScheduledEnd = task.scheduled_start
+        ? new Date(new Date(task.scheduled_start).getTime() + durationNum * 60 * 1000).toISOString()
+        : undefined;
+
+      const { error } = await supabase
         .from("tasks")
         .update({
           title: editTitle.trim(),
@@ -274,17 +297,16 @@ export default function TaskDetailScreen() {
           duration_minutes: durationNum,
           priority: editPriority,
           tags: editTags.length > 0 ? editTags : [],
-          due_date: editDueDate!.toISOString(),
+          ...(editDueDate ? { due_date: editDueDate.toISOString() } : {}),
           scheduling_method: editSchedulingMethod,
+          ...(newScheduledEnd ? { scheduled_end: newScheduledEnd } : {}),
         })
-        .eq("id", task.id)
-        .select()
-        .single();
+        .eq("id", task.id);
 
       if (error) throw error;
 
-      setTask(updatedTask as Task);
       setIsEditing(false);
+      await loadTask(); // Re-fetch so UI always reflects DB truth
     } catch (err) {
       console.error("[TaskDetail] Save error:", err);
       Alert.alert("Error", "Failed to save changes");
@@ -330,14 +352,23 @@ export default function TaskDetailScreen() {
           .single();
 
         if (parentTask) {
+          // Count existing instances to enforce end_count
+          const { count } = await supabase
+            .from("tasks")
+            .select("id", { count: "exact", head: true })
+            .eq("recurrence_parent_id", task.recurrence_parent_id);
+
           const nextInstance = generateNextInstance(
             parentTask as Task,
-            task.instance_date
+            task.instance_date,
+            (count ?? 0) + 1
           );
 
           if (nextInstance) {
             await supabase.from("tasks").insert(nextInstance);
             console.log("[TaskDetail] Generated next recurring instance");
+          } else {
+            console.log("[TaskDetail] Recurring end_count reached — no new instance");
           }
         }
       }
@@ -419,10 +450,72 @@ export default function TaskDetailScreen() {
 
       if (error) throw error;
 
+      trackTaskDeleted(); // fire-and-forget
       goBack();
     } catch (err) {
       console.error("[TaskDetail] Delete error:", err);
       Alert.alert("Error", "Failed to delete task");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleCompleteAllRecurrences = () => {
+    Alert.alert(
+      "Complete All",
+      "Mark all remaining instances of this recurring task as complete?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Complete All", onPress: confirmCompleteAll },
+      ]
+    );
+  };
+
+  const confirmCompleteAll = async () => {
+    if (!task?.recurrence_parent_id) return;
+    try {
+      setActionLoading(true);
+      await supabase.from("tasks")
+        .update({ status: "completed" })
+        .eq("recurrence_parent_id", task.recurrence_parent_id)
+        .in("status", ["pending_schedule", "scheduled", "in_progress"]);
+      await supabase.from("tasks")
+        .delete()
+        .eq("id", task.recurrence_parent_id);
+      goBack();
+    } catch (err) {
+      console.error("[TaskDetail] Complete all recurrences error:", err);
+      Alert.alert("Error", "Failed to complete all recurrences");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteAllRecurrences = () => {
+    Alert.alert(
+      "Delete All",
+      "Delete this task and all its recurring instances? This cannot be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete All", style: "destructive", onPress: confirmDeleteAll },
+      ]
+    );
+  };
+
+  const confirmDeleteAll = async () => {
+    if (!task?.recurrence_parent_id) return;
+    try {
+      setActionLoading(true);
+      await supabase.from("tasks")
+        .delete()
+        .eq("recurrence_parent_id", task.recurrence_parent_id);
+      await supabase.from("tasks")
+        .delete()
+        .eq("id", task.recurrence_parent_id);
+      goBack();
+    } catch (err) {
+      console.error("[TaskDetail] Delete all recurrences error:", err);
+      Alert.alert("Error", "Failed to delete all recurrences");
     } finally {
       setActionLoading(false);
     }
@@ -516,6 +609,7 @@ export default function TaskDetailScreen() {
           .eq("id", task!.id);
 
         setTask({ ...task!, status: "completed" });
+        trackTaskCompleted(); // fire-and-forget
       }
     } catch (err) {
       console.error("[TaskDetail] Toggle subtask error:", err);
@@ -805,6 +899,7 @@ export default function TaskDetailScreen() {
         await scheduleTaskReminder(updatedTask as Task);
       }
 
+      trackTaskRescheduled('modal'); // fire-and-forget
       setShowRescheduleModal(false);
 
       // If navigated here with ?reschedule=true, go back to home after success
@@ -928,7 +1023,7 @@ export default function TaskDetailScreen() {
         style={{ flex: 1 }}
       >
         {/* Header */}
-        <View style={[styles.header, { backgroundColor: appColors.surface, borderBottomColor: appColors.border }]}>
+        <View style={[styles.header, { backgroundColor: isEditing ? appColors.background : appColors.surface, borderBottomColor: isEditing ? "transparent" : appColors.border }]}>
           <Pressable onPress={() => goBack()} style={styles.backButton}>
             <MaterialCommunityIcons name="arrow-left" size={24} color={appColors.textPrimary} />
           </Pressable>
@@ -946,469 +1041,623 @@ export default function TaskDetailScreen() {
           )}
         </View>
 
-        <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-          {/* Title Section */}
-          <View style={[styles.titleSection, { backgroundColor: appColors.surface }]}>
-            {isEditing ? (
-              <TextInput
-                value={editTitle}
-                onChangeText={setEditTitle}
-                style={[styles.editTitleInput, { color: appColors.textPrimary }]}
-                mode="flat"
-                placeholder="Task title"
-                placeholderTextColor={appColors.textTertiary}
-                underlineColor="transparent"
-                activeUnderlineColor="transparent"
-                cursorColor={appColors.primary}
-                textColor={appColors.textPrimary}
-              />
-            ) : (
-              <Text style={[styles.title, { color: appColors.textPrimary }]}>{task.title}</Text>
-            )}
+        <ScrollView ref={scrollViewRef} style={isEditing ? styles.scrollView : styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+          {isEditing ? (
+            <>
+              {/* ── Title ── */}
+              <View style={styles.titleArea}>
+                <TextInput
+                  value={editTitle}
+                  onChangeText={setEditTitle}
+                  placeholder="Task title"
+                  style={[styles.titleInput, { color: appColors.textPrimary, backgroundColor: "transparent" }]}
+                  mode="flat"
+                  underlineColor="transparent"
+                  activeUnderlineColor="transparent"
+                  placeholderTextColor={appColors.textTertiary}
+                  cursorColor={appColors.primary}
+                  selectionColor={`${appColors.primary}40`}
+                  multiline
+                  theme={{ colors: { primary: appColors.primary, onSurfaceVariant: appColors.textTertiary } }}
+                />
+              </View>
 
-            {/* Status badges */}
-            {!isEditing && (
-              <View style={styles.badges}>
-                <View style={[styles.badge, { backgroundColor: getStatusColor(task.status) + "15" }]}>
-                  <View style={[styles.badgeDot, { backgroundColor: getStatusColor(task.status) }]} />
-                  <Text style={[styles.badgeText, { color: getStatusColor(task.status) }]}>
-                    {getStatusLabel(task.status)}
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+              {/* ── Schedule row ── */}
+              <View style={styles.attrRow}>
+                <View style={styles.attrRowLeft}>
+                  <MaterialCommunityIcons
+                    name={editSchedulingMethod === "SMART" ? "star-four-points" : "clock-outline"}
+                    size={17}
+                    color={editSchedulingMethod === "SMART" ? (appColors.aiPurple ?? appColors.secondary) : appColors.primary}
+                  />
+                  <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Schedule</Text>
+                </View>
+                <View style={styles.schedulePills}>
+                  <Pressable
+                    style={[styles.schedulePill, { backgroundColor: editSchedulingMethod === "MANUAL" ? appColors.primaryLight : appColors.inputBg }]}
+                    onPress={() => setEditSchedulingMethod("MANUAL")}
+                  >
+                    <Text style={[styles.schedulePillText, { color: editSchedulingMethod === "MANUAL" ? appColors.primary : appColors.textTertiary, fontWeight: editSchedulingMethod === "MANUAL" ? "700" : "500" }]}>
+                      Pick time
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.schedulePill, { backgroundColor: editSchedulingMethod === "SMART" && isPro ? (appColors.aiPurpleLight ?? appColors.secondaryLight) : appColors.inputBg, opacity: !isPro ? 0.6 : 1 }]}
+                    onPress={() => {
+                      if (isPro) {
+                        setEditSchedulingMethod("SMART");
+                        if (!editDueDate) setEditDueDate(endOfDay(addDays(new Date(), 1)));
+                      } else {
+                        router.push({ pathname: "/paywall", params: { source: "smart_scheduling" } });
+                      }
+                    }}
+                  >
+                    <MaterialCommunityIcons
+                      name="star-four-points"
+                      size={12}
+                      color={editSchedulingMethod === "SMART" && isPro ? (appColors.aiPurple ?? appColors.secondary) : appColors.textTertiary}
+                    />
+                    <Text style={[styles.schedulePillText, { color: editSchedulingMethod === "SMART" && isPro ? (appColors.aiPurple ?? appColors.secondary) : appColors.textTertiary, fontWeight: editSchedulingMethod === "SMART" && isPro ? "700" : "500" }]}>
+                      AI
+                    </Text>
+                    {!isPro && <MaterialCommunityIcons name="lock" size={10} color={appColors.textTertiary} />}
+                  </Pressable>
+                </View>
+              </View>
+
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+              {/* ── Deadline row (SMART only) ── */}
+              {editSchedulingMethod === "SMART" && (
+                <>
+                  <Pressable style={styles.attrRow} onPress={() => toggleEditField("deadline")}>
+                    <View style={styles.attrRowLeft}>
+                      <MaterialCommunityIcons
+                        name="calendar-clock"
+                        size={17}
+                        color={editDueDate ? appColors.primary : appColors.textTertiary}
+                      />
+                      <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Deadline</Text>
+                    </View>
+                    <View style={styles.attrRowRight}>
+                      <Text style={[styles.attrRowValue, { color: editDueDate ? appColors.primary : appColors.textTertiary }]}>
+                        {editDueDate
+                          ? (format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") ? "Today"
+                            : format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") ? "Tomorrow"
+                            : format(editDueDate, "EEE, MMM d"))
+                          : "Set date"}
+                      </Text>
+                      <MaterialCommunityIcons
+                        name={expandedEditField === "deadline" ? "chevron-up" : "chevron-right"}
+                        size={16}
+                        color={appColors.textTertiary}
+                      />
+                    </View>
+                  </Pressable>
+                  {expandedEditField === "deadline" && (
+                    <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+                      <View style={styles.dueDateOptions}>
+                        {[
+                          { label: "Today", date: endOfDay(new Date()) },
+                          { label: "Tomorrow", date: endOfDay(addDays(new Date(), 1)) },
+                          { label: "Next Week", date: endOfDay(addDays(new Date(), 7)) },
+                        ].map((item) => {
+                          const isSelected = editDueDate && format(editDueDate, "yyyy-MM-dd") === format(item.date, "yyyy-MM-dd");
+                          return (
+                            <Pressable
+                              key={item.label}
+                              style={[styles.dueDateChip, { backgroundColor: appColors.background }, isSelected && { backgroundColor: appColors.primary }]}
+                              onPress={() => { setEditDueDate(item.date); setExpandedEditField(null); }}
+                            >
+                              <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, isSelected && { color: "#FFFFFF" }]}>
+                                {item.label}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                        <Pressable style={[styles.dueDateChip, { backgroundColor: appColors.background }]} onPress={() => setShowDatePicker(true)}>
+                          <MaterialCommunityIcons name="calendar" size={16} color={appColors.textTertiary} />
+                        </Pressable>
+                      </View>
+                      {showDatePicker && (
+                        <DateTimePicker value={editDueDate || new Date()} mode="date" minimumDate={new Date()} onChange={handleDateChange} />
+                      )}
+                    </View>
+                  )}
+                  <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+                </>
+              )}
+
+              {/* ── Duration row ── */}
+              <Pressable style={styles.attrRow} onPress={() => toggleEditField("duration")}>
+                <View style={styles.attrRowLeft}>
+                  <MaterialCommunityIcons name="timer-outline" size={17} color={appColors.textTertiary} />
+                  <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Duration</Text>
+                </View>
+                <View style={styles.attrRowRight}>
+                  <Text style={[styles.attrRowValue, { color: appColors.textSecondary }]}>
+                    {editDuration === "60" ? "1h" : editDuration === "120" ? "2h" : `${editDuration}m`}
+                  </Text>
+                  <MaterialCommunityIcons
+                    name={expandedEditField === "duration" ? "chevron-up" : "chevron-right"}
+                    size={16}
+                    color={appColors.textTertiary}
+                  />
+                </View>
+              </Pressable>
+              {expandedEditField === "duration" && (
+                <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+                  <View style={styles.durationGrid}>
+                    {DURATION_PRESETS.map((preset) => {
+                      const isActive = editDuration === preset.value;
+                      return (
+                        <Pressable
+                          key={preset.value}
+                          style={[styles.durationChip, { backgroundColor: appColors.background }, isActive && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary }]}
+                          onPress={() => { setEditDuration(preset.value); setExpandedEditField(null); }}
+                        >
+                          <Text style={[styles.durationChipText, { color: appColors.textTertiary }, isActive && { color: appColors.primary }]}>
+                            {preset.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <View style={styles.customDurationRow}>
+                    <TextInput
+                      placeholder="Custom (mins)"
+                      value={DURATION_PRESETS.some(p => p.value === editDuration) ? "" : editDuration}
+                      onChangeText={setEditDuration}
+                      style={[styles.customDurationInput, { backgroundColor: appColors.background }]}
+                      mode="outlined"
+                      keyboardType="numeric"
+                      outlineColor={appColors.border}
+                      activeOutlineColor={appColors.primary}
+                      textColor={appColors.textPrimary}
+                      placeholderTextColor={appColors.textTertiary}
+                      right={<TextInput.Affix text="min" textStyle={[styles.durationAffix, { color: appColors.textTertiary }]} />}
+                      dense
+                      theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+                    />
+                  </View>
+                </View>
+              )}
+
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+              {/* ── Priority row ── */}
+              <Pressable style={styles.attrRow} onPress={() => toggleEditField("priority")}>
+                <View style={styles.attrRowLeft}>
+                  <MaterialCommunityIcons
+                    name={editPriority === "low" ? "flag-outline" : "flag"}
+                    size={17}
+                    color={editPriority === "high" ? appColors.priorityHigh : editPriority === "medium" ? appColors.priorityMedium : appColors.textTertiary}
+                  />
+                  <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Priority</Text>
+                </View>
+                <View style={styles.attrRowRight}>
+                  <Text style={[styles.attrRowValue, {
+                    color: editPriority === "high" ? appColors.priorityHigh
+                      : editPriority === "medium" ? appColors.priorityMedium
+                      : appColors.textTertiary,
+                  }]}>
+                    {editPriority === "high" ? "High" : editPriority === "medium" ? "Medium" : "Low"}
+                  </Text>
+                  <MaterialCommunityIcons
+                    name={expandedEditField === "priority" ? "chevron-up" : "chevron-right"}
+                    size={16}
+                    color={appColors.textTertiary}
+                  />
+                </View>
+              </Pressable>
+              {expandedEditField === "priority" && (
+                <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+                  <View style={styles.priorityRow}>
+                    {PRIORITY_OPTIONS.map((option) => {
+                      const dynamicColor = option.value === "high" ? appColors.priorityHigh
+                        : option.value === "medium" ? appColors.priorityMedium
+                        : appColors.priorityLow;
+                      const isActive = editPriority === option.value;
+                      return (
+                        <Pressable
+                          key={option.value}
+                          style={[styles.priorityCard, { backgroundColor: appColors.background }, isActive && { borderColor: dynamicColor, backgroundColor: `${dynamicColor}10` }]}
+                          onPress={() => { setEditPriority(option.value as "low" | "medium" | "high"); setExpandedEditField(null); }}
+                        >
+                          <MaterialCommunityIcons name={option.icon as any} size={18} color={isActive ? dynamicColor : appColors.textTertiary} />
+                          <Text style={[styles.priorityCardText, { color: appColors.textTertiary }, isActive && { color: dynamicColor }]}>
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+              {/* ── Notes row ── */}
+              <Pressable style={styles.attrRow} onPress={() => toggleEditField("notes")}>
+                <View style={styles.attrRowLeft}>
+                  <MaterialCommunityIcons
+                    name="text-box-outline"
+                    size={17}
+                    color={editDescription ? appColors.textSecondary : appColors.textTertiary}
+                  />
+                  <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Notes</Text>
+                </View>
+                <View style={styles.attrRowRight}>
+                  <Text style={[styles.attrRowValue, { color: appColors.textTertiary }]} numberOfLines={1}>
+                    {editDescription || "Optional"}
+                  </Text>
+                  <MaterialCommunityIcons
+                    name={expandedEditField === "notes" ? "chevron-up" : "chevron-right"}
+                    size={16}
+                    color={appColors.textTertiary}
+                  />
+                </View>
+              </Pressable>
+              {expandedEditField === "notes" && (
+                <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+                  <TextInput
+                    placeholder="Add notes..."
+                    value={editDescription}
+                    onChangeText={setEditDescription}
+                    style={[styles.descriptionInput, { backgroundColor: appColors.background }]}
+                    mode="outlined"
+                    multiline
+                    numberOfLines={3}
+                    outlineColor={appColors.border}
+                    activeOutlineColor={appColors.primary}
+                    cursorColor={appColors.primary}
+                    textColor={appColors.textPrimary}
+                    placeholderTextColor={appColors.textTertiary}
+                    contentStyle={styles.notesInputContent}
+                    theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+                  />
+                </View>
+              )}
+
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+
+              {/* ── Tags row ── */}
+              <Pressable
+                style={styles.attrRow}
+                onPress={() => {
+                  toggleEditField("tags");
+                  if (expandedEditField !== "tags") setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
+                }}
+              >
+                <View style={styles.attrRowLeft}>
+                  <MaterialCommunityIcons
+                    name="tag-outline"
+                    size={17}
+                    color={editTags.length > 0 ? appColors.secondary : appColors.textTertiary}
+                  />
+                  <Text style={[styles.attrRowLabel, { color: appColors.textPrimary }]}>Tags</Text>
+                </View>
+                <View style={styles.attrRowRight}>
+                  <Text style={[styles.attrRowValue, { color: appColors.textTertiary }]} numberOfLines={1}>
+                    {editTags.length > 0 ? editTags.join(", ") : "Optional"}
+                  </Text>
+                  <MaterialCommunityIcons
+                    name={expandedEditField === "tags" ? "chevron-up" : "chevron-right"}
+                    size={16}
+                    color={appColors.textTertiary}
+                  />
+                </View>
+              </Pressable>
+              {expandedEditField === "tags" && (
+                <View style={[styles.attrExpanded, { borderTopColor: appColors.border, backgroundColor: appColors.inputBg }]}>
+                  {editTags.length > 0 && (
+                    <View style={styles.tagChipsRow}>
+                      {editTags.map((tag) => (
+                        <View key={tag} style={[styles.tagChip, { backgroundColor: appColors.secondaryLight }]}>
+                          <Text style={[styles.tagChipText, { color: appColors.secondary }]}>{tag}</Text>
+                          <Pressable onPress={() => removeEditTag(tag)} hitSlop={8}>
+                            <MaterialCommunityIcons name="close" size={14} color={appColors.secondary} />
+                          </Pressable>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                  <View style={[styles.tagInputRow, { backgroundColor: appColors.background, marginTop: editTags.length > 0 ? 8 : 0 }]}>
+                    <MaterialCommunityIcons name="tag-plus" size={20} color={editTagInput ? appColors.primary : appColors.textTertiary} />
+                    <TextInput
+                      placeholder={editTags.length > 0 ? "Add another tag..." : "Add tags (e.g., work, personal)..."}
+                      value={editTagInput}
+                      onChangeText={setEditTagInput}
+                      onSubmitEditing={() => { if (editTagInput.trim()) addEditTag(editTagInput); }}
+                      style={[styles.tagInput, { color: appColors.textPrimary }]}
+                      mode="flat"
+                      underlineColor="transparent"
+                      activeUnderlineColor="transparent"
+                      cursorColor={appColors.primary}
+                      placeholderTextColor={appColors.textTertiary}
+                      textColor={appColors.textPrimary}
+                      dense
+                      theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+                    />
+                    {editTagInput.trim() && (
+                      <Pressable onPress={() => addEditTag(editTagInput)} style={[styles.addTagBtn, { backgroundColor: appColors.primary }]}>
+                        <MaterialCommunityIcons name="plus" size={16} color="#FFFFFF" />
+                      </Pressable>
+                    )}
+                  </View>
+                  {existingTags.filter(t => !editTags.includes(t)).length > 0 && (
+                    <View style={styles.tagSuggestionsContainer}>
+                      <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Quick add:</Text>
+                      <View style={styles.tagSuggestionsRow}>
+                        {existingTags.filter(t => !editTags.includes(t) && (!editTagInput || t.includes(editTagInput.toLowerCase()))).slice(0, 6).map((tag) => (
+                          <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.background, borderColor: appColors.border }]} onPress={() => addEditTag(tag)}>
+                            <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              <View style={[styles.listDivider, { backgroundColor: appColors.border }]} />
+            </>
+          ) : (
+            <>
+              {/* ── View Mode ── */}
+              {/* Title Section */}
+              <View style={[styles.titleSection, { backgroundColor: appColors.surface }]}>
+                <Text style={[styles.title, { color: appColors.textPrimary }]}>{task.title}</Text>
+                <View style={styles.badges}>
+                  <View style={[styles.badge, { backgroundColor: getStatusColor(task.status) + "15" }]}>
+                    <View style={[styles.badgeDot, { backgroundColor: getStatusColor(task.status) }]} />
+                    <Text style={[styles.badgeText, { color: getStatusColor(task.status) }]}>
+                      {getStatusLabel(task.status)}
+                    </Text>
+                  </View>
+                  {(task.is_recurring || isRecurringInstance(task)) && (
+                    <View style={[styles.badge, { backgroundColor: appColors.aiPurpleLight }]}>
+                      <MaterialCommunityIcons name="repeat" size={12} color={appColors.aiPurple} />
+                      <Text style={[styles.badgeText, { color: appColors.aiPurple }]}>
+                        {task.recurrence_rule ? getRecurrenceDescription(task.recurrence_rule) : "Recurring"}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Priority */}
+              <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                <View style={styles.cardHeader}>
+                  <MaterialCommunityIcons name="flag" size={18} color={appColors.textSecondary} />
+                  <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Priority</Text>
+                </View>
+                <View style={[styles.priorityDisplay, { backgroundColor: `${priorityConfig.color}10` }]}>
+                  <MaterialCommunityIcons name={priorityConfig.icon as any} size={18} color={priorityConfig.color} />
+                  <Text style={[styles.priorityDisplayText, { color: priorityConfig.color }]}>
+                    {priorityConfig.label} Priority
                   </Text>
                 </View>
-                {(task.is_recurring || isRecurringInstance(task)) && (
-                  <View style={[styles.badge, { backgroundColor: appColors.aiPurpleLight }]}>
-                    <MaterialCommunityIcons name="repeat" size={12} color={appColors.aiPurple} />
-                    <Text style={[styles.badgeText, { color: appColors.aiPurple }]}>
-                      {task.recurrence_rule ? getRecurrenceDescription(task.recurrence_rule) : "Recurring"}
+              </View>
+
+              {/* Scheduled Time */}
+              {task.scheduled_start && task.scheduled_end && (
+                <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                  <View style={styles.cardHeader}>
+                    <MaterialCommunityIcons name="calendar-clock" size={18} color={appColors.textSecondary} />
+                    <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Scheduled</Text>
+                  </View>
+                  <View style={styles.scheduleInfo}>
+                    <Text style={[styles.scheduleDate, { color: appColors.textSecondary }]}>{formatDate(task.scheduled_start)}</Text>
+                    <Text style={[styles.scheduleTime, { color: appColors.primary }]}>
+                      {formatTimeRange(task.scheduled_start, task.scheduled_end)}
                     </Text>
                   </View>
-                )}
-              </View>
-            )}
-          </View>
-
-          {/* Priority Selection (Edit mode) or Display */}
-          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-            <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="flag" size={18} color={appColors.textSecondary} />
-              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Priority</Text>
-            </View>
-            {isEditing ? (
-              <View style={styles.priorityOptions}>
-                {(["low", "medium", "high"] as const).map((p) => {
-                  const config = getPriorityConfig(p);
-                  const isSelected = editPriority === p;
-                  return (
-                    <Pressable
-                      key={p}
-                      style={[
-                        styles.priorityOption,
-                        { backgroundColor: appColors.inputBg },
-                        isSelected && { backgroundColor: `${config.color}15`, borderColor: config.color }
-                      ]}
-                      onPress={() => setEditPriority(p)}
-                    >
-                      <MaterialCommunityIcons
-                        name={config.icon as any}
-                        size={18}
-                        color={isSelected ? config.color : appColors.textTertiary}
-                      />
-                      <Text style={[styles.priorityOptionText, { color: appColors.textTertiary }, isSelected && { color: config.color }]}>
-                        {config.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ) : (
-              <View style={[styles.priorityDisplay, { backgroundColor: `${priorityConfig.color}10` }]}>
-                <MaterialCommunityIcons name={priorityConfig.icon as any} size={18} color={priorityConfig.color} />
-                <Text style={[styles.priorityDisplayText, { color: priorityConfig.color }]}>
-                  {priorityConfig.label} Priority
-                </Text>
-              </View>
-            )}
-          </View>
-
-          {/* Scheduled Time */}
-          {task.scheduled_start && task.scheduled_end && !isEditing && (
-            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="calendar-clock" size={18} color={appColors.textSecondary} />
-                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Scheduled</Text>
-              </View>
-              <View style={styles.scheduleInfo}>
-                <Text style={[styles.scheduleDate, { color: appColors.textSecondary }]}>{formatDate(task.scheduled_start)}</Text>
-                <Text style={[styles.scheduleTime, { color: appColors.primary }]}>
-                  {formatTimeRange(task.scheduled_start, task.scheduled_end)}
-                </Text>
-              </View>
-            </View>
-          )}
-
-          {/* Duration */}
-          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-            <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="timer-outline" size={18} color={appColors.textSecondary} />
-              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Duration</Text>
-            </View>
-            {isEditing ? (
-              <View style={styles.durationEditRow}>
-                <TextInput
-                  value={editDuration}
-                  onChangeText={setEditDuration}
-                  style={[styles.durationInput, { backgroundColor: appColors.surface }]}
-                  mode="outlined"
-                  keyboardType="numeric"
-                  outlineColor={appColors.border}
-                  activeOutlineColor={appColors.primary}
-                  cursorColor={appColors.primary}
-                  textColor={appColors.textPrimary}
-                  dense
-                />
-                <Text style={[styles.durationUnit, { color: appColors.textSecondary }]}>minutes</Text>
-              </View>
-            ) : (
-              <Text style={[styles.durationValue, { color: appColors.textPrimary }]}>{task.duration_minutes} minutes</Text>
-            )}
-          </View>
-
-          {/* Due Date - Edit mode */}
-          {isEditing && (
-            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="calendar" size={18} color={appColors.textSecondary} />
-                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Due Date</Text>
-              </View>
-              <View style={styles.dueDateOptions}>
-                <Pressable
-                  style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") && { backgroundColor: appColors.primary }]}
-                  onPress={() => setEditDueDate(endOfDay(new Date()))}
-                >
-                  <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(new Date(), "yyyy-MM-dd") && { color: "#FFFFFF" }]}>
-                    Today
-                  </Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") && { backgroundColor: appColors.primary }]}
-                  onPress={() => setEditDueDate(endOfDay(addDays(new Date(), 1)))}
-                >
-                  <Text style={[styles.dueDateChipText, { color: appColors.textTertiary }, editDueDate && format(editDueDate, "yyyy-MM-dd") === format(addDays(new Date(), 1), "yyyy-MM-dd") && { color: "#FFFFFF" }]}>
-                    Tomorrow
-                  </Text>
-                </Pressable>
-                <Pressable style={[styles.dueDateChip, { backgroundColor: appColors.inputBg }]} onPress={() => setShowDatePicker(true)}>
-                  <MaterialCommunityIcons name="calendar-edit" size={16} color={appColors.textTertiary} />
-                </Pressable>
-              </View>
-              {editDueDate && format(editDueDate, "yyyy-MM-dd") !== format(new Date(), "yyyy-MM-dd") && format(editDueDate, "yyyy-MM-dd") !== format(addDays(new Date(), 1), "yyyy-MM-dd") && (
-                <Text style={[styles.selectedDueDateText, { color: appColors.primary }]}>Due: {format(editDueDate, "EEE, MMM d")}</Text>
+                </View>
               )}
-              {showDatePicker && (
-                <DateTimePicker
-                  value={editDueDate || new Date()}
-                  mode="date"
-                  minimumDate={new Date()}
-                  onChange={handleDateChange}
-                />
-              )}
-            </View>
-          )}
 
-          {/* Scheduling Method - Edit mode */}
-          {isEditing && (
-            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="robot-outline" size={18} color={appColors.textSecondary} />
-                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Scheduling Method</Text>
+              {/* Duration */}
+              <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                <View style={styles.cardHeader}>
+                  <MaterialCommunityIcons name="timer-outline" size={18} color={appColors.textSecondary} />
+                  <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Duration</Text>
+                </View>
+                <Text style={[styles.durationValue, { color: appColors.textPrimary }]}>{task.duration_minutes} minutes</Text>
               </View>
-              <View style={styles.schedulingOptions}>
-                <Pressable
-                  style={[styles.schedulingOption, { backgroundColor: appColors.inputBg }, editSchedulingMethod === "SMART" && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary }]}
-                  onPress={() => setEditSchedulingMethod("SMART")}
-                >
-                  <MaterialCommunityIcons
-                    name="robot-outline"
-                    size={20}
-                    color={editSchedulingMethod === "SMART" ? appColors.primary : appColors.textTertiary}
-                  />
-                  <View style={styles.schedulingOptionContent}>
-                    <Text style={[styles.schedulingOptionTitle, { color: appColors.textPrimary }, editSchedulingMethod === "SMART" && { color: appColors.primary }]}>
-                      AI Scheduling
-                    </Text>
-                    <Text style={[styles.schedulingOptionDesc, { color: appColors.textTertiary }]}>Find best time automatically</Text>
-                  </View>
-                  {editSchedulingMethod === "SMART" && (
-                    <MaterialCommunityIcons name="check-circle" size={20} color={appColors.primary} />
-                  )}
-                </Pressable>
-                <Pressable
-                  style={[styles.schedulingOption, { backgroundColor: appColors.inputBg }, editSchedulingMethod === "MANUAL" && { backgroundColor: appColors.primaryLight, borderColor: appColors.primary }]}
-                  onPress={() => setEditSchedulingMethod("MANUAL")}
-                >
-                  <MaterialCommunityIcons
-                    name="calendar-cursor"
-                    size={20}
-                    color={editSchedulingMethod === "MANUAL" ? appColors.primary : appColors.textTertiary}
-                  />
-                  <View style={styles.schedulingOptionContent}>
-                    <Text style={[styles.schedulingOptionTitle, { color: appColors.textPrimary }, editSchedulingMethod === "MANUAL" && { color: appColors.primary }]}>
-                      Manual
-                    </Text>
-                    <Text style={[styles.schedulingOptionDesc, { color: appColors.textTertiary }]}>Choose your own time</Text>
-                  </View>
-                  {editSchedulingMethod === "MANUAL" && (
-                    <MaterialCommunityIcons name="check-circle" size={20} color={appColors.primary} />
-                  )}
-                </Pressable>
-              </View>
-            </View>
-          )}
 
-          {/* Tags - Edit mode or display */}
-          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-            <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="tag-multiple" size={18} color={appColors.textSecondary} />
-              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Tags</Text>
-            </View>
-            {isEditing ? (
-              <View style={styles.tagsEditSection}>
-                {/* Selected tags */}
-                {editTags.length > 0 && (
+              {/* Tags */}
+              <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                <View style={styles.cardHeader}>
+                  <MaterialCommunityIcons name="tag-multiple" size={18} color={appColors.textSecondary} />
+                  <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Tags</Text>
+                </View>
+                {task.tags && task.tags.length > 0 ? (
                   <View style={styles.tagChipsRow}>
-                    {editTags.map((tag) => (
-                      <View key={tag} style={[styles.tagChip, { backgroundColor: appColors.secondaryLight }]}>
-                        <Text style={[styles.tagChipText, { color: appColors.secondary }]}>{tag}</Text>
-                        <Pressable onPress={() => removeEditTag(tag)} hitSlop={8}>
-                          <MaterialCommunityIcons name="close" size={14} color={appColors.secondary} />
-                        </Pressable>
+                    {task.tags.map((tag) => (
+                      <View key={tag} style={[styles.tagChipDisplay, { backgroundColor: appColors.secondaryLight }]}>
+                        <Text style={[styles.tagChipDisplayText, { color: appColors.secondary }]}>{tag}</Text>
                       </View>
                     ))}
                   </View>
+                ) : (
+                  <Text style={[styles.emptyDescription, { color: appColors.textTertiary }]}>No tags</Text>
                 )}
-                {/* Tag input */}
-                <View style={[styles.tagInputRow, { backgroundColor: appColors.inputBg }]}>
-                  <MaterialCommunityIcons name="tag-plus" size={18} color={editTagInput ? appColors.primary : appColors.textTertiary} />
-                  <TextInput
-                    placeholder={editTags.length > 0 ? "Add another tag..." : "Add tags..."}
-                    value={editTagInput}
-                    onChangeText={setEditTagInput}
-                    onSubmitEditing={() => {
-                      if (editTagInput.trim()) addEditTag(editTagInput);
-                    }}
-                    style={[styles.tagInput, { color: appColors.textPrimary }]}
-                    mode="flat"
-                    underlineColor="transparent"
-                    activeUnderlineColor="transparent"
-                    cursorColor={appColors.primary}
-                    placeholderTextColor={appColors.textTertiary}
-                    textColor={appColors.textPrimary}
-                    dense
-                    theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
-                  />
-                  {editTagInput.trim() && (
-                    <Pressable onPress={() => addEditTag(editTagInput)} style={[styles.addTagBtn, { backgroundColor: appColors.primary }]}>
-                      <MaterialCommunityIcons name="plus" size={16} color="#FFFFFF" />
-                    </Pressable>
+              </View>
+
+              {/* Description */}
+              <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                <View style={styles.cardHeader}>
+                  <MaterialCommunityIcons name="text" size={18} color={appColors.textSecondary} />
+                  <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Notes</Text>
+                </View>
+                {task.description ? (
+                  <Text style={[styles.descriptionText, { color: appColors.textPrimary }]}>{task.description}</Text>
+                ) : (
+                  <Text style={[styles.emptyDescription, { color: appColors.textTertiary }]}>No notes added</Text>
+                )}
+              </View>
+
+              {/* Details */}
+              <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                <View style={styles.cardHeader}>
+                  <MaterialCommunityIcons name="information-outline" size={18} color={appColors.textSecondary} />
+                  <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Details</Text>
+                </View>
+                <View style={styles.detailsList}>
+                  <View style={styles.detailItem}>
+                    <Text style={[styles.detailLabel, { color: appColors.textSecondary }]}>Scheduling</Text>
+                    <Text style={[styles.detailValue, { color: appColors.textPrimary }]}>
+                      {task.scheduling_method === "SMART" ? "AI Optimized" : "Manual"}
+                    </Text>
+                  </View>
+                  {task.due_date && (
+                    <View style={styles.detailItem}>
+                      <Text style={[styles.detailLabel, { color: appColors.textSecondary }]}>Due Date</Text>
+                      <Text style={[styles.detailValue, { color: appColors.textPrimary }]}>{formatDate(task.due_date)}</Text>
+                    </View>
                   )}
                 </View>
-                {/* Tag suggestions */}
-                {existingTags.filter(t => !editTags.includes(t)).length > 0 && (
-                  <View style={styles.tagSuggestions}>
-                    <Text style={[styles.tagSuggestionsLabel, { color: appColors.textTertiary }]}>Quick add:</Text>
-                    <View style={styles.tagSuggestionsRow}>
-                      {existingTags.filter(t => !editTags.includes(t) && (!editTagInput || t.includes(editTagInput.toLowerCase()))).slice(0, 5).map((tag) => (
-                        <Pressable key={tag} style={[styles.tagSuggestion, { backgroundColor: appColors.inputBg, borderColor: appColors.border }]} onPress={() => addEditTag(tag)}>
-                          <Text style={[styles.tagSuggestionText, { color: appColors.textSecondary }]}>{tag}</Text>
+              </View>
+
+              {/* Subtasks Section */}
+              {!task.parent_task_id && (
+                <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                  <View style={styles.cardHeader}>
+                    <MaterialCommunityIcons name="format-list-checks" size={18} color={appColors.textSecondary} />
+                    <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Subtasks</Text>
+                    {subtasks.length > 0 && (
+                      <View style={[styles.subtaskBadge, { backgroundColor: appColors.chipBg }]}>
+                        <Text style={[styles.subtaskBadgeText, { color: appColors.textSecondary }]}>{getSubtaskProgressText()}</Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {subtasks.length > 0 && (
+                    <ProgressBar
+                      progress={getSubtaskProgress()}
+                      color={appColors.success}
+                      style={[styles.progressBar, { backgroundColor: appColors.chipBg }]}
+                    />
+                  )}
+
+                  {subtasks.map((subtask) => (
+                    <Pressable
+                      key={subtask.id}
+                      style={[styles.subtaskItem, { borderBottomColor: appColors.border }]}
+                      onPress={() => router.push(`/task/${subtask.id}`)}
+                    >
+                      <Pressable onPress={() => handleToggleSubtask(subtask)} style={styles.subtaskCheckbox}>
+                        <MaterialCommunityIcons
+                          name={subtask.status === "completed" ? "checkbox-marked-circle" : "checkbox-blank-circle-outline"}
+                          size={22}
+                          color={subtask.status === "completed" ? appColors.success : appColors.textTertiary}
+                        />
+                      </Pressable>
+                      <Text
+                        style={[
+                          styles.subtaskTitle,
+                          { color: appColors.textPrimary },
+                          subtask.status === "completed" && { textDecorationLine: "line-through", color: appColors.textTertiary },
+                        ]}
+                      >
+                        {subtask.title}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-right" size={18} color={appColors.textTertiary} />
+                    </Pressable>
+                  ))}
+
+                  {showAddSubtask ? (
+                    <View style={styles.addSubtaskContainer}>
+                      <TextInput
+                        mode="outlined"
+                        placeholder="Subtask title"
+                        value={newSubtaskTitle}
+                        onChangeText={setNewSubtaskTitle}
+                        style={[styles.addSubtaskInput, { backgroundColor: appColors.surface }]}
+                        outlineColor={appColors.border}
+                        activeOutlineColor={appColors.primary}
+                        cursorColor={appColors.primary}
+                        textColor={appColors.textPrimary}
+                        placeholderTextColor={appColors.textTertiary}
+                        dense
+                        autoFocus
+                        onSubmitEditing={handleAddSubtask}
+                        theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
+                      />
+                      <View style={styles.addSubtaskActions}>
+                        <Pressable onPress={() => { setShowAddSubtask(false); setNewSubtaskTitle(""); }} style={styles.cancelSubtaskBtn}>
+                          <Text style={[styles.cancelSubtaskText, { color: appColors.textSecondary }]}>Cancel</Text>
                         </Pressable>
-                      ))}
+                        <Pressable
+                          onPress={handleAddSubtask}
+                          disabled={!newSubtaskTitle.trim() || addingSubtask}
+                          style={[styles.addSubtaskBtn, { backgroundColor: appColors.primary }, (!newSubtaskTitle.trim() || addingSubtask) && styles.addSubtaskBtnDisabled]}
+                        >
+                          {addingSubtask ? (
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.addSubtaskBtnText}>Add</Text>
+                          )}
+                        </Pressable>
+                      </View>
                     </View>
-                  </View>
-                )}
-              </View>
-            ) : task.tags && task.tags.length > 0 ? (
-              <View style={styles.tagChipsRow}>
-                {task.tags.map((tag) => (
-                  <View key={tag} style={[styles.tagChipDisplay, { backgroundColor: appColors.secondaryLight }]}>
-                    <Text style={[styles.tagChipDisplayText, { color: appColors.secondary }]}>{tag}</Text>
-                  </View>
-                ))}
-              </View>
-            ) : (
-              <Text style={[styles.emptyDescription, { color: appColors.textTertiary }]}>No tags</Text>
-            )}
-          </View>
+                  ) : (
+                    <Pressable style={styles.addSubtaskRow} onPress={() => setShowAddSubtask(true)}>
+                      <MaterialCommunityIcons name="plus" size={20} color={appColors.primary} />
+                      <Text style={[styles.addSubtaskText, { color: appColors.primary }]}>Add Subtask</Text>
+                    </Pressable>
+                  )}
 
-          {/* Description */}
-          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-            <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="text" size={18} color={appColors.textSecondary} />
-              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Notes</Text>
-            </View>
-            {isEditing ? (
-              <TextInput
-                value={editDescription}
-                onChangeText={setEditDescription}
-                style={[styles.descriptionInput, { backgroundColor: appColors.surface }]}
-                mode="outlined"
-                multiline
-                numberOfLines={3}
-                placeholder="Add notes..."
-                outlineColor={appColors.border}
-                activeOutlineColor={appColors.primary}
-                cursorColor={appColors.primary}
-                textColor={appColors.textPrimary}
-                placeholderTextColor={appColors.textTertiary}
-                contentStyle={{ paddingTop: 12 }}
-                theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
-              />
-            ) : task.description ? (
-              <Text style={[styles.descriptionText, { color: appColors.textPrimary }]}>{task.description}</Text>
-            ) : (
-              <Text style={[styles.emptyDescription, { color: appColors.textTertiary }]}>No notes added</Text>
-            )}
-          </View>
-
-          {/* Details (view mode only) */}
-          {!isEditing && (
-            <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-              <View style={styles.cardHeader}>
-                <MaterialCommunityIcons name="information-outline" size={18} color={appColors.textSecondary} />
-                <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Details</Text>
-              </View>
-              <View style={styles.detailsList}>
-                <View style={styles.detailItem}>
-                  <Text style={[styles.detailLabel, { color: appColors.textSecondary }]}>Scheduling</Text>
-                  <Text style={[styles.detailValue, { color: appColors.textPrimary }]}>
-                    {task.scheduling_method === "SMART" ? "AI Optimized" : "Manual"}
-                  </Text>
-                </View>
-                {task.due_date && (
-                  <View style={styles.detailItem}>
-                    <Text style={[styles.detailLabel, { color: appColors.textSecondary }]}>Due Date</Text>
-                    <Text style={[styles.detailValue, { color: appColors.textPrimary }]}>{formatDate(task.due_date)}</Text>
-                  </View>
-                )}
-              </View>
-            </View>
-          )}
-
-        {/* Subtasks Section - only show for parent tasks and not in edit mode */}
-        {!task.parent_task_id && !isEditing && (
-          <View style={[styles.card, { backgroundColor: appColors.surface }]}>
-            <View style={styles.cardHeader}>
-              <MaterialCommunityIcons name="format-list-checks" size={18} color={appColors.textSecondary} />
-              <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Subtasks</Text>
-              {subtasks.length > 0 && (
-                <View style={[styles.subtaskBadge, { backgroundColor: appColors.chipBg }]}>
-                  <Text style={[styles.subtaskBadgeText, { color: appColors.textSecondary }]}>{getSubtaskProgressText()}</Text>
+                  {subtasks.length === 0 && !showAddSubtask && (
+                    <Text style={[styles.noSubtasks, { color: appColors.textTertiary }]}>Break this task into smaller steps</Text>
+                  )}
                 </View>
               )}
-            </View>
 
-            {/* Progress bar */}
-            {subtasks.length > 0 && (
-              <ProgressBar
-                progress={getSubtaskProgress()}
-                color={appColors.success}
-                style={[styles.progressBar, { backgroundColor: appColors.chipBg }]}
-              />
-            )}
-
-            {/* Subtask list */}
-            {subtasks.map((subtask) => (
-              <Pressable
-                key={subtask.id}
-                style={[styles.subtaskItem, { borderBottomColor: appColors.border }]}
-                onPress={() => router.push(`/task/${subtask.id}`)}
-              >
-                <Pressable
-                  onPress={() => handleToggleSubtask(subtask)}
-                  style={styles.subtaskCheckbox}
-                >
-                  <MaterialCommunityIcons
-                    name={subtask.status === "completed" ? "checkbox-marked-circle" : "checkbox-blank-circle-outline"}
-                    size={22}
-                    color={subtask.status === "completed" ? appColors.success : appColors.textTertiary}
-                  />
-                </Pressable>
-                <Text
-                  style={[
-                    styles.subtaskTitle,
-                    { color: appColors.textPrimary },
-                    subtask.status === "completed" && { textDecorationLine: "line-through", color: appColors.textTertiary },
-                  ]}
-                >
-                  {subtask.title}
-                </Text>
-                <MaterialCommunityIcons name="chevron-right" size={18} color={appColors.textTertiary} />
-              </Pressable>
-            ))}
-
-            {/* Add subtask input */}
-            {showAddSubtask ? (
-              <View style={styles.addSubtaskContainer}>
-                <TextInput
-                  mode="outlined"
-                  placeholder="Subtask title"
-                  value={newSubtaskTitle}
-                  onChangeText={setNewSubtaskTitle}
-                  style={[styles.addSubtaskInput, { backgroundColor: appColors.surface }]}
-                  outlineColor={appColors.border}
-                  activeOutlineColor={appColors.primary}
-                  cursorColor={appColors.primary}
-                  textColor={appColors.textPrimary}
-                  placeholderTextColor={appColors.textTertiary}
-                  dense
-                  autoFocus
-                  onSubmitEditing={handleAddSubtask}
-                  theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
-                />
-                <View style={styles.addSubtaskActions}>
-                  <Pressable onPress={() => { setShowAddSubtask(false); setNewSubtaskTitle(""); }} style={styles.cancelSubtaskBtn}>
-                    <Text style={[styles.cancelSubtaskText, { color: appColors.textSecondary }]}>Cancel</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={handleAddSubtask}
-                    disabled={!newSubtaskTitle.trim() || addingSubtask}
-                    style={[styles.addSubtaskBtn, { backgroundColor: appColors.primary }, (!newSubtaskTitle.trim() || addingSubtask) && styles.addSubtaskBtnDisabled]}
-                  >
-                    {addingSubtask ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.addSubtaskBtnText}>Add</Text>
-                    )}
-                  </Pressable>
+              {/* Manage Series */}
+              {isRecurringInstance(task) && (
+                <View style={[styles.card, { backgroundColor: appColors.surface }]}>
+                  <View style={styles.cardHeader}>
+                    <MaterialCommunityIcons name="repeat" size={18} color={appColors.textSecondary} />
+                    <Text style={[styles.cardLabel, { color: appColors.textSecondary }]}>Manage Series</Text>
+                  </View>
+                  <View style={styles.seriesActions}>
+                    <Pressable
+                      style={[styles.seriesBtn, { backgroundColor: appColors.successLight }]}
+                      onPress={handleCompleteAllRecurrences}
+                      disabled={actionLoading}
+                    >
+                      <MaterialCommunityIcons name="check-all" size={16} color={appColors.success} />
+                      <Text style={[styles.seriesBtnText, { color: appColors.success }]}>Complete all</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.seriesBtn, { backgroundColor: appColors.errorLight }]}
+                      onPress={handleDeleteAllRecurrences}
+                      disabled={actionLoading}
+                    >
+                      <MaterialCommunityIcons name="delete-sweep-outline" size={16} color={appColors.error} />
+                      <Text style={[styles.seriesBtnText, { color: appColors.error }]}>Delete all</Text>
+                    </Pressable>
+                  </View>
                 </View>
-              </View>
-            ) : (
-              <Pressable style={styles.addSubtaskRow} onPress={() => setShowAddSubtask(true)}>
-                <MaterialCommunityIcons name="plus" size={20} color={appColors.primary} />
-                <Text style={[styles.addSubtaskText, { color: appColors.primary }]}>Add Subtask</Text>
+              )}
+
+              {/* Delete */}
+              <Pressable style={styles.deleteButton} onPress={handleDelete}>
+                <MaterialCommunityIcons name="delete-outline" size={20} color={appColors.error} />
+                <Text style={[styles.deleteButtonText, { color: appColors.error }]}>Delete Task</Text>
               </Pressable>
-            )}
 
-            {subtasks.length === 0 && !showAddSubtask && (
-              <Text style={[styles.noSubtasks, { color: appColors.textTertiary }]}>Break this task into smaller steps</Text>
-            )}
-          </View>
-        )}
-
-        {/* Danger Zone */}
-        {!isEditing && (
-          <Pressable style={styles.deleteButton} onPress={handleDelete}>
-            <MaterialCommunityIcons name="delete-outline" size={20} color={appColors.error} />
-            <Text style={[styles.deleteButtonText, { color: appColors.error }]}>Delete Task</Text>
-          </Pressable>
-        )}
-
-        {/* Spacer for bottom action bar */}
-        <View style={{ height: isEditing ? 120 : 130 }} />
-      </ScrollView>
+              <View style={{ height: 130 }} />
+            </>
+          )}
+        </ScrollView>
 
       {/* Bottom Actions */}
       {isEditing ? (
-        <View style={[styles.bottomAction, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
+        <View style={[styles.bottomAction, { backgroundColor: appColors.surface, borderTopColor: appColors.border, paddingBottom: insets.bottom + 20 }]}>
           <Pressable
             style={[
               styles.saveButton,
@@ -1429,7 +1678,7 @@ export default function TaskDetailScreen() {
           </Pressable>
         </View>
       ) : task.status !== "completed" ? (
-        <View style={[styles.bottomActions, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
+        <View style={[styles.bottomActions, { backgroundColor: appColors.surface, borderTopColor: appColors.border, paddingBottom: insets.bottom + 20 }]}>
           <Pressable style={[styles.rescheduleBtn, { borderColor: appColors.primary, backgroundColor: appColors.surface }]} onPress={handleReschedule} disabled={actionLoading}>
             <MaterialCommunityIcons name="calendar-clock" size={20} color={appColors.primary} />
             <Text style={[styles.rescheduleBtnText, { color: appColors.primary }]}>
@@ -1459,7 +1708,7 @@ export default function TaskDetailScreen() {
           </Pressable>
         </View>
       ) : (
-        <View style={[styles.completedBanner, { backgroundColor: appColors.successLight, borderTopColor: appColors.successLight }]}>
+        <View style={[styles.completedBanner, { backgroundColor: appColors.successLight, borderTopColor: appColors.successLight, paddingBottom: insets.bottom + 20 }]}>
           <MaterialCommunityIcons name="check-circle" size={20} color={appColors.success} />
           <Text style={[styles.completedBannerText, { color: appColors.success }]}>Task completed</Text>
         </View>
@@ -1479,6 +1728,11 @@ export default function TaskDetailScreen() {
         schedulingMethod={rescheduleMethod}
         busySlots={busySlots}
         onMethodChosen={handleMethodChoice}
+        isPro={isPro}
+        onPaywall={() => {
+          setShowRescheduleModal(false);
+          router.push({ pathname: "/paywall", params: { source: "smart_reschedule" } });
+        }}
       />
 
       {/* Scheduling Feedback Modal (shown for AI-scheduled tasks) */}
@@ -1975,16 +2229,30 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     color: COLORS.error,
   },
+  seriesActions: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 4,
+  },
+  seriesBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  seriesBtnText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
   // Bottom actions
   bottomAction: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.background,
     paddingHorizontal: 20,
     paddingVertical: 16,
-    paddingBottom: 44,
+    paddingBottom: 24,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
@@ -2013,8 +2281,8 @@ const styles = StyleSheet.create({
     gap: 12,
     backgroundColor: COLORS.surface,
     paddingHorizontal: 20,
-    paddingVertical: 16,
-    paddingBottom: 44,
+    paddingTop: 16,
+    paddingBottom: 16,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
@@ -2065,8 +2333,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
     backgroundColor: "#F0FDF4",
-    paddingVertical: 16,
-    paddingBottom: 32,
+    paddingTop: 16,
+    paddingBottom: 16,
     borderTopWidth: 1,
     borderTopColor: "#D1FAE5",
   },
@@ -2074,6 +2342,140 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "600",
     color: COLORS.success,
+  },
+
+  // Edit mode — attr row layout
+  scrollView: {
+    flex: 1,
+  },
+  titleArea: {
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 20,
+  },
+  titleInput: {
+    fontSize: 22,
+    fontWeight: "600",
+    backgroundColor: "transparent",
+    paddingHorizontal: 0,
+    lineHeight: 30,
+    minHeight: 56,
+  },
+  listDivider: {
+    height: 1,
+  },
+  attrRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    minHeight: 54,
+  },
+  attrRowLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    flex: 1,
+  },
+  attrRowLabel: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: COLORS.textPrimary,
+  },
+  attrRowRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  attrRowValue: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+    maxWidth: 160,
+    textAlign: "right",
+  },
+  attrExpanded: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 16,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  schedulePills: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  schedulePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: COLORS.background,
+  },
+  schedulePillText: {
+    fontSize: 13,
+    fontWeight: "500",
+    color: COLORS.textTertiary,
+  },
+  durationGrid: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 8,
+  },
+  durationChip: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: "#F8F9FB",
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  durationChipText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.textTertiary,
+  },
+  customDurationRow: {
+    flexDirection: "row",
+  },
+  customDurationInput: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    fontSize: 14,
+  },
+  durationAffix: {
+    color: COLORS.textTertiary,
+    fontSize: 13,
+  },
+  priorityRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  priorityCard: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: "#F8F9FB",
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  priorityCardText: {
+    fontSize: 14,
+    fontWeight: "500",
+    color: COLORS.textTertiary,
+  },
+  notesInputContent: {
+    paddingTop: 8,
+  },
+  tagSuggestionsContainer: {
+    marginTop: 8,
+    gap: 6,
   },
 
 });

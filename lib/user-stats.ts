@@ -164,7 +164,9 @@ export async function getDailyCompletions(days: number = 7): Promise<DailyComple
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
-      const dateStr = date.toISOString().split('T')[0];
+      // Use local date components — toISOString() returns UTC which mismatches
+      // the local-timezone dates returned by the DB function for non-UTC users
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
       result.push({
         date: dateStr,
         count: dataMap.get(dateStr) || 0,
@@ -260,15 +262,20 @@ export function generateProductivityInsight(
 ): string[] {
   const insights: string[] = [];
 
+  const isNewUser = stats.total_completed < 20;
+  const hourThreshold = isNewUser ? 2 : 3;
+  const dayThreshold = isNewUser ? 2 : 3;
+  const schedulingThreshold = 10;
+
   // Most productive hour
   const bestHour = getMostProductiveHour(hourlyData);
-  if (bestHour && bestHour.count >= 3) {
+  if (bestHour && bestHour.count >= hourThreshold) {
     insights.push(`You're most productive around ${bestHour.formatted}`);
   }
 
   // Most productive day
   const bestDay = getMostProductiveDay(weekdayData);
-  if (bestDay && bestDay.count >= 3) {
+  if (bestDay && bestDay.count >= dayThreshold) {
     insights.push(`${bestDay.day_name}s are your strongest day`);
   }
 
@@ -276,17 +283,19 @@ export function generateProductivityInsight(
   if (stats.completion_rate >= 80) {
     insights.push("Great job! You're completing most of your tasks");
   } else if (stats.completion_rate >= 50) {
-    insights.push('Consider breaking large tasks into smaller ones');
+    insights.push('Try breaking larger tasks into smaller steps');
   } else if (stats.completion_rate > 0) {
-    insights.push('Try scheduling fewer tasks to build momentum');
+    insights.push('Schedule fewer tasks at a time to build momentum');
   }
 
-  // Scheduling method insight
-  const { smartPercent } = getSchedulingRatio(stats);
-  if (smartPercent > 70) {
-    insights.push('AI scheduling is helping optimize your day');
-  } else if (smartPercent > 0 && smartPercent < 30) {
-    insights.push('Try SMART scheduling for better time optimization');
+  // Scheduling method insight — only after enough data
+  const { smartPercent, totalScheduled } = getSchedulingRatio(stats);
+  if (totalScheduled >= schedulingThreshold) {
+    if (smartPercent > 70) {
+      insights.push('AI scheduling is helping optimize your day');
+    } else if (smartPercent < 30) {
+      insights.push('Try SMART scheduling for better time optimization');
+    }
   }
 
   // Streak insight

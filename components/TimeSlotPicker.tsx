@@ -348,6 +348,23 @@ export default function TimeSlotPicker({
                   >
                     {slot.label}
                   </Text>
+                  {/* Conflicts — show each task name + time range within this hour */}
+                  {!isSelected && slot.partialConflicts.map((c, i) => {
+                    const fmtMin = (min: number) => min === 0 ? "00" : String(min).padStart(2, "0");
+                    const startH = slot.hour;
+                    const endH = c.endMin === 60 ? slot.hour + 1 : slot.hour;
+                    const endMin = c.endMin === 60 ? 0 : c.endMin;
+                    const fmt12 = (h: number, m: number) => {
+                      const p = h >= 12 ? "pm" : "am";
+                      const d = h > 12 ? h - 12 : h === 0 ? 12 : h;
+                      return `${d}:${fmtMin(m)}${p}`;
+                    };
+                    return (
+                      <Text key={i} style={[styles.partialConflictText, { color: appColors.error }]} numberOfLines={1}>
+                        {fmt12(startH, c.startMin)}–{fmt12(endH, endMin)} · {c.title}
+                      </Text>
+                    );
+                  })}
                   {/* Runs past midnight warning */}
                   {slot.bleeds && slot.status === "available" && (
                     <Text style={[styles.bleedsNote, { color: appColors.warning }]}>
@@ -389,16 +406,12 @@ export default function TimeSlotPicker({
                   )}
                 </View>
               </View>
-              <Text
-                style={[
-                  styles.statusText,
-                  slot.status === "available"
-                    ? { color: appColors.success }
-                    : { color: appColors.textTertiary },
-                ]}
-              >
-                {slot.status === "available" ? "Available" : slot.busyReason || "Busy"}
-              </Text>
+              {slot.status === "available" && slot.partialConflicts.length === 0 && (
+                <Text style={[styles.statusText, { color: appColors.success }]}>Free</Text>
+              )}
+              {slot.status === "busy" && slot.busyReason === "Past" && (
+                <Text style={[styles.statusText, { color: appColors.textTertiary }]}>Past</Text>
+              )}
             </Pressable>
           );
         })}
@@ -555,6 +568,11 @@ const styles = StyleSheet.create({
   timeSlotText: {
     fontSize: 16,
     fontWeight: "500",
+  },
+  partialConflictText: {
+    fontSize: 11,
+    marginTop: 3,
+    opacity: 0.8,
   },
   bleedsNote: {
     fontSize: 11,

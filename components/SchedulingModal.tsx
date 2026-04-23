@@ -9,7 +9,7 @@
  * - Shows TimeSlotPicker component
  */
 
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   StyleSheet,
@@ -18,6 +18,7 @@ import {
   ScrollView,
   Platform,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   Text,
   Button,
@@ -47,6 +48,8 @@ interface SchedulingModalProps {
   busySlots?: { start: string; end: string; title: string }[];
   onMethodChosen?: (method: "SMART" | "MANUAL") => void;
   preselectedDate?: Date;
+  isPro?: boolean;
+  onPaywall?: () => void;
 }
 
 export default function SchedulingModal({
@@ -61,9 +64,13 @@ export default function SchedulingModal({
   busySlots = [],
   onMethodChosen,
   preselectedDate,
+  isPro = false,
+  onPaywall,
 }: SchedulingModalProps) {
   const appColors = useAppColors();
-  const { tourStep, advanceTour, skipTour } = useGuidedTour();
+  const insets = useSafeAreaInsets();
+  const { tourStep, advanceTour, skipTour: _skipTour } = useGuidedTour();
+  const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
   const [showAlternatives, setShowAlternatives] = useState(false);
   // Local dismissed flags so tooltip hides without advancing tour step
   const [aiTooltipDismissed, setAiTooltipDismissed] = useState(false);
@@ -83,6 +90,13 @@ export default function SchedulingModal({
   React.useEffect(() => {
     setManualTooltipDismissed(false);
   }, [visible]);
+
+  // Auto-select top slot when alternatives list opens
+  React.useEffect(() => {
+    if (showAlternatives && slots.length > 0) {
+      setSelectedSlot(slots[0]);
+    }
+  }, [showAlternatives]);
 
   const topSlot = slots[0];
   const alternativeSlots = slots.slice(1);
@@ -134,7 +148,7 @@ export default function SchedulingModal({
                 ? "I Found Your Best Time"
                 : "Select a Time"}
             </Text>
-            <IconButton icon="close" size={24} onPress={onClose} iconColor={appColors.textSecondary} />
+            <IconButton icon="close" size={24} onPress={onClose} iconColor={appColors.textSecondary} style={{ margin: 0 }} />
           </View>
 
           {/* Due Date Picker (shown for overdue / no due date tasks before AI scheduling) */}
@@ -234,8 +248,14 @@ export default function SchedulingModal({
               </Text>
 
               <Pressable
-                style={[styles.methodCard, { backgroundColor: `${appColors.primary}10` }]}
+                style={[
+                  styles.methodCard,
+                  isPro
+                    ? { backgroundColor: `${appColors.primary}10` }
+                    : { backgroundColor: appColors.inputBg, opacity: 0.8 },
+                ]}
                 onPress={() => {
+                  if (!isPro) { onPaywall?.(); return; }
                   // Overdue or no due date — always ask for a new deadline
                   if (task && (!task.due_date || new Date(task.due_date) < new Date())) {
                     setTempDueDate(endOfDay(addDays(new Date(), 1)));
@@ -245,16 +265,27 @@ export default function SchedulingModal({
                   onMethodChosen?.("SMART");
                 }}
               >
-                <View style={[styles.methodCardIcon, { backgroundColor: `${appColors.primary}20` }]}>
-                  <MaterialCommunityIcons name="brain" size={28} color={appColors.primary} />
+                <View style={[styles.methodCardIcon, { backgroundColor: isPro ? `${appColors.primary}20` : appColors.chipBg }]}>
+                  <MaterialCommunityIcons name="brain" size={28} color={isPro ? appColors.primary : appColors.textTertiary} />
                 </View>
                 <View style={styles.methodCardContent}>
-                  <Text style={[styles.methodCardTitle, { color: appColors.textPrimary }]}>AI Smart Schedule</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={[styles.methodCardTitle, { color: isPro ? appColors.textPrimary : appColors.textSecondary }]}>AI Smart Schedule</Text>
+                    {!isPro && (
+                      <View style={[styles.proBadge, { backgroundColor: appColors.aiPurple ?? "#7C6FBF" }]}>
+                        <MaterialCommunityIcons name="crown" size={10} color="#fff" />
+                        <Text style={styles.proBadgeText}>Pro</Text>
+                      </View>
+                    )}
+                  </View>
                   <Text style={[styles.methodCardDesc, { color: appColors.textSecondary }]}>
-                    Find the best time based on your habits and calendar
+                    {isPro ? "Find the best time based on your habits and calendar" : "Upgrade to Pro to use AI scheduling"}
                   </Text>
                 </View>
-                <MaterialCommunityIcons name="chevron-right" size={24} color={appColors.textTertiary} />
+                {isPro
+                  ? <MaterialCommunityIcons name="chevron-right" size={24} color={appColors.textTertiary} />
+                  : <MaterialCommunityIcons name="lock-outline" size={20} color={appColors.textTertiary} />
+                }
               </Pressable>
 
               <Pressable
@@ -282,7 +313,7 @@ export default function SchedulingModal({
               <Text style={[styles.loadingText, { color: appColors.textSecondary }]}>
                 {schedulingMethod === "SMART"
                   ? "Finding your perfect time..."
-                  : "Loading available times..."}
+                  : "Checking your schedule..."}
               </Text>
             </View>
           )}
@@ -299,7 +330,7 @@ export default function SchedulingModal({
 
           {/* MANUAL Scheduling UI - NOT in ScrollView since TimeSlotPicker has its own */}
           {schedulingMethod === "MANUAL" && !isLoading && !error && (
-            <View style={styles.manualContent}>
+            <View style={[styles.manualContent, { paddingBottom: insets.bottom + 16 }]}>
               <TimeSlotPicker
                 task={task}
                 busySlots={busySlots}
@@ -313,6 +344,7 @@ export default function SchedulingModal({
           {schedulingMethod === "SMART" && !isLoading && !error && (
             <ScrollView
               style={styles.content}
+              contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}
               showsVerticalScrollIndicator={false}
             >
               {topSlot ? (
@@ -488,21 +520,22 @@ export default function SchedulingModal({
         body="I ranked these by your focus patterns and deadline. The top slot is your energy peak. Don't like it? Tap 'Show other times' to see all options."
         ctaLabel="Got it — I'll pick one"
         onCta={() => setAiTooltipDismissed(true)}
-        onSkip={skipTour}
+        onSkip={() => setAiTooltipDismissed(true)}
         showSkip
-        showUpArrow
+        position="top"
       />
 
       {/* Tour tooltip: manual method choice */}
       <TourTooltip
-        visible={tourStep === "tour_manual_schedule" && schedulingMethod === null && !isLoading && !needsDueDate && !manualTooltipDismissed}
+        visible={tourStep === "tour_manual_schedule" && schedulingMethod === "MANUAL" && !isLoading && !manualTooltipDismissed}
         icon="clock-edit-outline"
         iconColor={appColors.secondary}
-        title="Pick your own time"
-        body="Tap 'Pick a Time' above to choose any free slot yourself. You're in full control."
+        title="Your day, laid out"
+        body="Scroll through and you'll see your existing tasks already blocking those times. Pick any free slot for this one."
+        position="top"
         ctaLabel="Got it"
         onCta={() => setManualTooltipDismissed(true)}
-        onSkip={skipTour}
+        onSkip={() => setManualTooltipDismissed(true)}
         showSkip
         showUpArrow
       />
@@ -526,19 +559,21 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 16,
+    paddingTop: 10,
+    paddingBottom: 10,
     borderBottomWidth: 1,
   },
   title: {
     fontWeight: "600",
+    margin: 0,
   },
   content: {
     padding: 20,
   },
   manualContent: {
     flex: 1,
-    padding: 20,
+    paddingTop: 0,
+    paddingHorizontal: 20,
     paddingBottom: 0,
   },
   loadingContainer: {
@@ -748,6 +783,19 @@ const styles = StyleSheet.create({
   methodCardDesc: {
     fontSize: 13,
     lineHeight: 18,
+  },
+  proBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  proBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#fff",
   },
   // Due date picker styles
   dueDateContainer: {

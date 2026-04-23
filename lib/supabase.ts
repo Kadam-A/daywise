@@ -44,11 +44,14 @@ const customStorage = {
         }
         return null;
       }
-      // Native: use SecureStore for auth tokens
+      // Native: use SecureStore for auth tokens, with AsyncStorage fallback
+      // for large values (JWTs exceed SecureStore's 2048 byte limit)
       if ((key.includes("auth-token") || key.includes("sb-")) && SecureStore) {
-        return await SecureStore.getItemAsync(key);
+        const secureValue = await SecureStore.getItemAsync(key);
+        if (secureValue !== null) return secureValue;
+        // May have been stored in AsyncStorage due to size fallback
+        return await AsyncStorage.getItem(key);
       }
-      // Fallback to AsyncStorage
       return await AsyncStorage.getItem(key);
     } catch (error) {
       console.error(`[Storage] Error reading key "${key}":`, error);
@@ -65,15 +68,19 @@ const customStorage = {
         }
         return;
       }
-      // Native: use SecureStore for auth tokens
-      if ((key.includes("auth-token") || key.includes("sb-")) && SecureStore) {
-        await SecureStore.setItemAsync(key, value);
-      } else {
-        await AsyncStorage.setItem(key, value);
-      }
+      // Native: always use AsyncStorage for auth tokens.
+      // SecureStore can hang indefinitely on Android's Keystore for any value size,
+      // which causes setSession() to never return (mutex held forever → deadlock).
+      // AsyncStorage is sufficient — JWTs are short-lived (1hr expiry).
+      await AsyncStorage.setItem(key, value);
     } catch (error) {
       console.error(`[Storage] Error setting key "${key}":`, error);
-      throw error;
+      // Don't rethrow — fall back to AsyncStorage rather than breaking auth
+      try {
+        await AsyncStorage.setItem(key, value);
+      } catch (fallbackError) {
+        console.error(`[Storage] AsyncStorage fallback also failed:`, fallbackError);
+      }
     }
   },
 
@@ -86,11 +93,11 @@ const customStorage = {
         }
         return;
       }
-      // Native: use SecureStore for auth tokens
+      // Native: remove from AsyncStorage (primary store).
+      // Also attempt SecureStore deletion to clean up any values written before this fix.
+      await AsyncStorage.removeItem(key);
       if ((key.includes("auth-token") || key.includes("sb-")) && SecureStore) {
-        await SecureStore.deleteItemAsync(key);
-      } else {
-        await AsyncStorage.removeItem(key);
+        await SecureStore.deleteItemAsync(key).catch(() => {});
       }
     } catch (error) {
       console.error(`[Storage] Error removing key "${key}":`, error);

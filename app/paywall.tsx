@@ -13,12 +13,12 @@ import {
   Pressable,
   ActivityIndicator,
   Alert,
+  Image,
 } from 'react-native';
 import { Text } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { PurchasesPackage } from 'react-native-purchases';
 import {
   getPackages,
@@ -30,13 +30,14 @@ import {
   PRODUCT_IDS,
 } from '@/lib/purchases';
 import { useSubscription } from '@/contexts/SubscriptionContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { trackPaywallViewed, trackPaywallDismissed } from '@/lib/analytics';
 import { useAppColors } from '@/contexts/ThemeContext';
+import { capture } from '@/lib/posthog';
 
 // Design System
 const COLORS = {
-  gradientStart: '#4A90E2',
-  gradientEnd: '#7C6FBF',
+  primary: '#4A90E2',
   background: '#F8F9FB',
   surface: '#FFFFFF',
   textPrimary: '#1A1D23',
@@ -53,21 +54,23 @@ interface FeatureRow {
   title: string;
   free: string | boolean;
   pro: string | boolean;
+  comingSoon?: boolean; // shown for both free and pro
 }
 
 const FEATURES: FeatureRow[] = [
-  { icon: 'brain', title: 'AI Scheduling', free: '3/week', pro: 'Unlimited' },
-  { icon: 'calendar-check', title: 'Local Scheduling', free: true, pro: true },
-  { icon: 'repeat', title: 'Recurring Tasks', free: '3 max', pro: 'Unlimited' },
-  { icon: 'history', title: 'Task History', free: '30 days', pro: 'Unlimited' },
-  { icon: 'clock-edit-outline', title: 'Auto-Reschedule', free: '1/week', pro: 'Unlimited' },
-  { icon: 'google', title: 'Google Calendar Sync', free: false, pro: true },
+  { icon: 'brain', title: 'AI Scheduling', free: false, pro: 'Unlimited' },
+  { icon: 'calendar-check', title: 'Manual Scheduling', free: true, pro: true },
+  { icon: 'drag', title: 'Drag & Drop', free: true, pro: true },
+  { icon: 'clock-edit-outline', title: 'Auto-Reschedule', free: false, pro: 'Unlimited' },
   { icon: 'chart-line', title: 'Advanced Analytics', free: false, pro: true },
+  { icon: 'google', title: 'Google Calendar Sync', free: false, pro: false, comingSoon: true },
 ];
 
 export default function PaywallScreen() {
   const appColors = useAppColors();
-  const { refresh, isTrialing, trialDaysRemaining } = useSubscription();
+  const { isAdmin } = useAuth();
+  const { refresh, isTrialing, trialDaysRemaining, hasEverTrialed, isPro } = useSubscription();
+  const { source } = useLocalSearchParams<{ source?: string }>();
   const [packages, setPackages] = useState<PurchasesPackage[]>([]);
   const [selectedPlan, setSelectedPlan] = useState<'monthly' | 'yearly'>('yearly');
   const [isLoading, setIsLoading] = useState(true);
@@ -75,7 +78,7 @@ export default function PaywallScreen() {
   const [isRestoring, setIsRestoring] = useState(false);
 
   useEffect(() => {
-    trackPaywallViewed();
+    trackPaywallViewed(source);
     loadPackages();
   }, []);
 
@@ -105,7 +108,7 @@ export default function PaywallScreen() {
   const selectedPackage = selectedPlan === 'monthly' ? monthlyPackage : yearlyPackage;
   const yearlySavings = monthlyPackage && yearlyPackage
     ? getYearlySavings(monthlyPackage, yearlyPackage)
-    : 29;
+    : Math.round(((6.99 * 12 - 59.99) / (6.99 * 12)) * 100);
 
   const handlePurchase = async () => {
     if (!selectedPackage) {
@@ -180,22 +183,25 @@ export default function PaywallScreen() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <LinearGradient
-            colors={[COLORS.gradientStart, COLORS.gradientEnd]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
+          <Image
+            source={require('@/assets/images/android-icon-foreground.png')}
             style={styles.iconContainer}
-          >
-            <MaterialCommunityIcons name="robot-outline" size={40} color="#FFFFFF" />
-          </LinearGradient>
-          <Text style={[styles.title, { color: appColors.textPrimary }]}>Unlock AI Scheduling</Text>
+            resizeMode="cover"
+          />
+          <Text style={[styles.title, { color: appColors.textPrimary }]}>
+            {isTrialing ? 'Upgrade to Pro' : hasEverTrialed ? 'Your Trial Has Ended' : 'Unlock AI Scheduling'}
+          </Text>
           <Text style={[styles.subtitle, { color: appColors.textSecondary }]}>
-            Let AI find your perfect time based on your energy patterns
+            {isTrialing
+              ? `${trialDaysRemaining} day${trialDaysRemaining !== 1 ? 's' : ''} left — keep your Pro features`
+              : hasEverTrialed
+              ? 'Upgrade to keep AI scheduling and auto-reschedule'
+              : 'Let AI find your perfect time based on your energy patterns'}
           </Text>
         </View>
 
-        {/* Trial Badge */}
-        {!isTrialing && (
+        {/* Trial badge — never trialed */}
+        {!isTrialing && !hasEverTrialed && (
           <View style={[styles.trialBadge, { backgroundColor: appColors.secondaryLight }]}>
             <MaterialCommunityIcons name="gift-outline" size={18} color={appColors.secondary} />
             <Text style={[styles.trialBadgeText, { color: appColors.secondary }]}>7-day free trial • No credit card required</Text>
@@ -223,7 +229,7 @@ export default function PaywallScreen() {
               {/* Yearly Plan */}
               <Pressable
                 style={[styles.planCard, { backgroundColor: appColors.surface, borderColor: appColors.border }, selectedPlan === 'yearly' && { borderColor: appColors.primary, backgroundColor: `${appColors.primary}08` }]}
-                onPress={() => setSelectedPlan('yearly')}
+                onPress={() => { setSelectedPlan('yearly'); capture('plan_selected', { plan: 'yearly' }); }}
               >
                 <View style={[styles.savingsBadge, { backgroundColor: appColors.success }]}>
                   <Text style={styles.savingsText}>Save {yearlySavings}%</Text>
@@ -234,7 +240,9 @@ export default function PaywallScreen() {
                     {yearlyPackage ? formatPrice(yearlyPackage) : '$59.99'}/year
                   </Text>
                   <Text style={[styles.planPriceMonthly, { color: appColors.textTertiary }]}>
-                    ~{yearlyPackage ? `$${(yearlyPackage.product.price / 12).toFixed(2)}` : '$5.00'}/month
+                    ~{yearlyPackage
+                      ? new Intl.NumberFormat('en', { style: 'currency', currency: yearlyPackage.product.currencyCode, minimumFractionDigits: 2 }).format(yearlyPackage.product.price / 12)
+                      : '$5.00'}/month
                   </Text>
                 </View>
                 {selectedPlan === 'yearly' && (
@@ -245,7 +253,7 @@ export default function PaywallScreen() {
               {/* Monthly Plan */}
               <Pressable
                 style={[styles.planCard, { backgroundColor: appColors.surface, borderColor: appColors.border }, selectedPlan === 'monthly' && { borderColor: appColors.primary, backgroundColor: `${appColors.primary}08` }]}
-                onPress={() => setSelectedPlan('monthly')}
+                onPress={() => { setSelectedPlan('monthly'); capture('plan_selected', { plan: 'monthly' }); }}
               >
                 <View style={styles.planCardContent}>
                   <Text style={[styles.planName, { color: appColors.textPrimary }]}>Monthly</Text>
@@ -272,14 +280,9 @@ export default function PaywallScreen() {
                 <Text style={[styles.featureHeaderText, { color: appColors.textSecondary }]}>Free</Text>
               </View>
               <View style={styles.featureValueCol}>
-                <LinearGradient
-                  colors={[COLORS.gradientStart, COLORS.gradientEnd]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.proHeader}
-                >
+                <View style={[styles.proHeader, { backgroundColor: appColors.primary }]}>
                   <Text style={styles.proHeaderText}>Pro</Text>
-                </LinearGradient>
+                </View>
               </View>
             </View>
 
@@ -295,7 +298,9 @@ export default function PaywallScreen() {
                   <Text style={[styles.featureName, { color: appColors.textPrimary }]}>{feature.title}</Text>
                 </View>
                 <View style={styles.featureValueCol}>
-                  {typeof feature.free === 'boolean' ? (
+                  {feature.comingSoon ? (
+                    <Text style={[styles.featureValue, { color: appColors.textTertiary }]}>—</Text>
+                  ) : typeof feature.free === 'boolean' ? (
                     <MaterialCommunityIcons
                       name={feature.free ? 'check' : 'close'}
                       size={20}
@@ -306,11 +311,13 @@ export default function PaywallScreen() {
                   )}
                 </View>
                 <View style={styles.featureValueCol}>
-                  {typeof feature.pro === 'boolean' ? (
+                  {feature.comingSoon ? (
+                    <Text style={[styles.comingSoonText, { color: appColors.primary }]}>Soon</Text>
+                  ) : typeof feature.pro === 'boolean' ? (
                     <MaterialCommunityIcons
-                      name="check"
+                      name={feature.pro ? 'check' : 'close'}
                       size={20}
-                      color={appColors.success}
+                      color={feature.pro ? appColors.success : appColors.textTertiary}
                     />
                   ) : (
                     <Text style={[styles.featureValue, { color: appColors.secondary, fontWeight: '600' }]}>{feature.pro}</Text>
@@ -331,48 +338,36 @@ export default function PaywallScreen() {
       {/* Bottom Actions */}
       <View style={[styles.bottomActions, { backgroundColor: appColors.surface, borderTopColor: appColors.border }]}>
         {/* Main CTA */}
-        {!isTrialing ? (
+        {!isTrialing && !hasEverTrialed ? (
+          /* Never trialed — offer free trial */
           <Pressable
-            style={styles.trialButton}
+            style={[styles.trialButton, { backgroundColor: appColors.primary }]}
             onPress={handleStartTrial}
             disabled={isPurchasing}
           >
-            <LinearGradient
-              colors={[COLORS.gradientStart, COLORS.gradientEnd]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.trialButtonGradient}
-            >
-              {isPurchasing ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
-                <>
-                  <Text style={styles.trialButtonText}>Start 7-Day Free Trial</Text>
-                  <Text style={styles.trialButtonSubtext}>No credit card required</Text>
-                </>
-              )}
-            </LinearGradient>
+            <Text style={styles.trialButtonText}>Start 7-Day Free Trial</Text>
+            <Text style={styles.trialButtonSubtext}>No credit card required</Text>
+            {isPurchasing && <ActivityIndicator color="#FFFFFF" style={{ marginTop: 6 }} />}
           </Pressable>
         ) : (
+          /* Trialing or trial expired — offer paid subscription */
           <Pressable
-            style={styles.trialButton}
+            style={[styles.trialButton, { backgroundColor: appColors.primary }, (isPurchasing || !selectedPackage) && { opacity: 0.6 }]}
             onPress={handlePurchase}
             disabled={isPurchasing || !selectedPackage}
           >
-            <LinearGradient
-              colors={[COLORS.gradientStart, COLORS.gradientEnd]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.trialButtonGradient}
-            >
-              {isPurchasing ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
+            {isPurchasing ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <>
                 <Text style={styles.trialButtonText}>
-                  Subscribe {selectedPlan === 'yearly' ? 'Annually' : 'Monthly'}
+                  {isTrialing ? 'Upgrade Now' : 'Subscribe'} · {selectedPlan === 'yearly' ? 'Annual' : 'Monthly'}
                 </Text>
-              )}
-            </LinearGradient>
+                {isTrialing && (
+                  <Text style={styles.trialButtonSubtext}>Keep your Pro features uninterrupted</Text>
+                )}
+              </>
+            )}
           </Pressable>
         )}
 
@@ -395,7 +390,9 @@ export default function PaywallScreen() {
 
         {/* Free forever note */}
         <Text style={[styles.freeNote, { color: appColors.textTertiary }]}>
-          Free plan always available • Cancel anytime
+          {hasEverTrialed && !isTrialing
+            ? 'Manual scheduling is always free • Cancel anytime'
+            : 'Free plan always available • Cancel anytime'}
         </Text>
       </View>
     </SafeAreaView>
@@ -440,12 +437,15 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
   iconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 90,
+    height: 90,
+    borderRadius: 22,
     marginBottom: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 6,
   },
   title: {
     fontSize: 28,
@@ -507,7 +507,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   planCardSelected: {
-    borderColor: COLORS.gradientStart,
+    borderColor: COLORS.primary,
     backgroundColor: '#F8FAFF',
   },
   planCardContent: {
@@ -605,6 +605,12 @@ const styles = StyleSheet.create({
     color: COLORS.aiPurple,
     fontWeight: '600',
   },
+  comingSoonText: {
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
 
   // Social Proof
   socialProof: {
@@ -632,8 +638,6 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     marginBottom: 16,
-  },
-  trialButtonGradient: {
     paddingVertical: 18,
     alignItems: 'center',
   },
@@ -656,7 +660,7 @@ const styles = StyleSheet.create({
   },
   restoreText: {
     fontSize: 14,
-    color: COLORS.gradientStart,
+    color: COLORS.primary,
     fontWeight: '500',
   },
   termsText: {

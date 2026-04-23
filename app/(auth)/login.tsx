@@ -5,23 +5,28 @@
  * Users can toggle between Sign Up and Sign In modes for email auth.
  */
 
-import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform, Pressable } from "react-native";
+import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform, Pressable, Linking } from "react-native";
 import { Button, Text, Surface, ActivityIndicator, TextInput, Divider } from "react-native-paper";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import * as WebBrowser from "expo-web-browser";
 import { makeRedirectUri } from "expo-auth-session";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
+import { getPostAuthRoute } from "@/lib/auth-utils";
 import { useAppColors } from "@/contexts/ThemeContext";
+import { posthog, identifyUser } from "@/lib/posthog";
 
 // Required for web browser auth sessions
 WebBrowser.maybeCompleteAuthSession();
 
-// Password requirements
+// Password requirements — must match Supabase project password strength policy
 const MIN_PASSWORD_LENGTH = 8;
-const PASSWORD_REGEX = /^(?=.*[0-9]).{8,}$/; // At least 8 chars and 1 number
+const HAS_LOWERCASE = /[a-z]/;
+const HAS_UPPERCASE = /[A-Z]/;
+const HAS_NUMBER = /[0-9]/;
+const HAS_SPECIAL = /[!@#$%^&*()_+\-=\[\]{};':"\\|<>?,./`~]/;
 
 const COLORS = {
   primary: "#4A90E2",
@@ -43,6 +48,16 @@ export default function LoginScreen() {
   const appColors = useAppColors();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const { verified } = useLocalSearchParams<{ verified?: string }>();
+
+  // Show notice when arriving from email verification
+  useEffect(() => {
+    if (verified === "1") {
+      setNotice("Email verified! Sign in to continue.");
+      setAuthMode("signin");
+    }
+  }, [verified]);
 
   // Auth mode
   const [authMode, setAuthMode] = useState<AuthMode>("signup");
@@ -75,8 +90,6 @@ export default function LoginScreen() {
         preferLocalhost: false,
       });
 
-      console.log("[OAuth] Redirect URI:", redirectUri);
-
       const { data, error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
@@ -88,33 +101,60 @@ export default function LoginScreen() {
       if (oauthError) throw oauthError;
       if (!data.url) throw new Error("No OAuth URL returned");
 
-      const result = await WebBrowser.openAuthSessionAsync(
-        data.url,
-        redirectUri
-      );
+      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUri);
 
       if (result.type === "success" && result.url) {
-        const url = new URL(result.url);
-        const params = new URLSearchParams(url.hash.substring(1));
-        const accessToken = params.get("access_token");
-        const refreshToken = params.get("refresh_token");
+        // PKCE code flow (Supabase JS v2 default) — code in query params
+        const codeMatch = result.url.match(/[?&]code=([^&#]+)/);
+        const code = codeMatch?.[1];
 
-        if (accessToken) {
-          const { error: sessionError } = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken || "",
-          });
-
+        if (code) {
+          const { data: sessionData, error: sessionError } = await supabase.auth.exchangeCodeForSession(code);
           if (sessionError) throw sessionError;
+          if (sessionData.user) {
+            identifyUser(sessionData.user.id, sessionData.user.email);
+            posthog.capture('user_signed_in', { method: 'google' });
+          }
+          router.replace(await getPostAuthRoute());
+          return;
+        }
 
-          await checkOnboardingAndNavigate();
+        // Fallback: implicit flow — access_token in URL hash
+        // Use regex instead of new URL() to safely handle custom schemes (daywise://)
+        const hashMatch = result.url.match(/#(.+)/);
+        if (hashMatch) {
+          const hashParams = new URLSearchParams(hashMatch[1]);
+          const accessToken = hashParams.get("access_token");
+          const refreshToken = hashParams.get("refresh_token");
+
+          if (accessToken) {
+            const { data: sessionData, error: sessionError } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken || "",
+            });
+            if (sessionError) throw sessionError;
+            if (sessionData.user) {
+              identifyUser(sessionData.user.id, sessionData.user.email);
+              posthog.capture('user_signed_in', { method: 'google' });
+            }
+            router.replace(await getPostAuthRoute());
+          }
         }
       } else if (result.type === "cancel") {
-        setError("Sign in cancelled");
+        if (Platform.OS === "android") {
+          // On Android the OS intercepts daywise://auth/callback via Intent, dismissing
+          // the browser and returning 'cancel'. auth/callback.tsx is already processing
+          // the result — do nothing here; its 10s fallback handles failure cases.
+        } else {
+          // On iOS a genuine user tap of "Cancel" in the browser returns this.
+          setError("Sign in cancelled");
+        }
       }
     } catch (err) {
       console.error("[Login Error]", err);
-      setError(err instanceof Error ? err.message : "Failed to sign in");
+      const message = err instanceof Error ? err.message : "Failed to sign in";
+      posthog.capture('user_sign_in_failed', { method: 'google', error: message });
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -132,10 +172,7 @@ export default function LoginScreen() {
         email: email.trim(),
         password,
         options: {
-          emailRedirectTo: makeRedirectUri({
-            scheme: "daywise",
-            path: "auth/callback",
-          }),
+          emailRedirectTo: "daywise://auth/callback",
         },
       });
 
@@ -148,6 +185,9 @@ export default function LoginScreen() {
           return;
         }
 
+        identifyUser(data.user.id, data.user.email);
+        posthog.capture('user_signed_up', { method: 'email', requires_confirmation: !data.session });
+
         if (!data.session) {
           // Email confirmation required
           router.replace({
@@ -156,12 +196,22 @@ export default function LoginScreen() {
           });
         } else {
           // No confirmation needed (unlikely in production)
-          await checkOnboardingAndNavigate();
+          router.replace(await getPostAuthRoute());
         }
       }
     } catch (err) {
       console.error("[SignUp Error]", err);
-      setError(err instanceof Error ? err.message : "Failed to create account");
+      // AuthWeakPasswordError has name "AuthWeakPasswordError" — give a friendly message
+      // rather than exposing the raw Supabase character-set string to the user.
+      let message: string;
+      if (err instanceof Error && err.name === "AuthWeakPasswordError") {
+        message =
+          "Password doesn't meet the security requirements. Please ensure it includes uppercase, lowercase, a number, and a special character.";
+      } else {
+        message = err instanceof Error ? err.message : "Failed to create account";
+      }
+      posthog.capture('user_sign_in_failed', { method: 'email_signup', error: message });
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -183,35 +233,22 @@ export default function LoginScreen() {
       if (signInError) throw signInError;
 
       if (data.user) {
-        await checkOnboardingAndNavigate();
+        identifyUser(data.user.id, data.user.email);
+        posthog.capture('user_signed_in', { method: 'email' });
+        router.replace(await getPostAuthRoute());
       }
     } catch (err) {
       console.error("[SignIn Error]", err);
+      let message: string;
       if (err instanceof Error && err.message.includes("Invalid login")) {
-        setError("Invalid email or password");
+        message = "Invalid email or password";
       } else {
-        setError(err instanceof Error ? err.message : "Failed to sign in");
+        message = err instanceof Error ? err.message : "Failed to sign in";
       }
+      posthog.capture('user_sign_in_failed', { method: 'email_signin', error: message });
+      setError(message);
     } finally {
       setLoading(false);
-    }
-  };
-
-  // Check if user needs onboarding and navigate
-  const checkOnboardingAndNavigate = async () => {
-    const { data: profile } = await supabase
-      .from("user_profiles")
-      .select("personality_data")
-      .single();
-
-    const isDefaultProfile =
-      profile?.personality_data?.chronotype === 50 &&
-      profile?.personality_data?.focus_duration === 50;
-
-    if (isDefaultProfile) {
-      router.replace("/(auth)/onboarding");
-    } else {
-      router.replace("/(tabs)/home");
     }
   };
 
@@ -236,15 +273,24 @@ export default function LoginScreen() {
         >
           {/* Logo */}
           <View style={styles.logoContainer}>
-            <Text style={styles.logo}>⏰</Text>
-            <Text style={[styles.title, { color: appColors.primary }]}>DayWise</Text>
+            <Text style={[styles.headline, { color: appColors.textPrimary }]}>
+              The right task,{"\n"}at the right time.
+            </Text>
             <Text style={[styles.tagline, { color: appColors.textSecondary }]}>
-              Time management, tailored to you
+              AI that builds your perfect day.
             </Text>
           </View>
 
           {/* Auth Form */}
           <View style={styles.formContainer}>
+            {/* Verified notice */}
+            {notice && (
+              <View style={[styles.errorContainer, { backgroundColor: appColors.successLight }]}>
+                <MaterialCommunityIcons name="check-circle" size={18} color={appColors.success} />
+                <Text style={[styles.errorText, { color: appColors.success }]}>{notice}</Text>
+              </View>
+            )}
+
             {/* Error Message */}
             {error && (
               <View style={[styles.errorContainer, { backgroundColor: appColors.errorLight }]}>
@@ -317,6 +363,13 @@ export default function LoginScreen() {
               theme={{ colors: { onSurfaceVariant: appColors.textTertiary } }}
             />
 
+            {/* Forgot Password (Sign In only) */}
+            {authMode === "signin" && (
+              <Pressable onPress={() => router.push("/(auth)/forgot-password")} style={styles.forgotPassword}>
+                <Text style={[styles.forgotPasswordText, { color: appColors.primary }]}>Forgot password?</Text>
+              </Pressable>
+            )}
+
             {/* Password Requirements (Sign Up only) */}
             {authMode === "signup" && password.length > 0 && (
               <View style={styles.passwordRequirements}>
@@ -325,8 +378,20 @@ export default function LoginScreen() {
                   text="At least 8 characters"
                 />
                 <PasswordRequirement
-                  met={/[0-9]/.test(password)}
-                  text="At least 1 number"
+                  met={HAS_LOWERCASE.test(password)}
+                  text="At least one lowercase letter (a-z)"
+                />
+                <PasswordRequirement
+                  met={HAS_UPPERCASE.test(password)}
+                  text="At least one uppercase letter (A-Z)"
+                />
+                <PasswordRequirement
+                  met={HAS_NUMBER.test(password)}
+                  text="At least one number (0-9)"
+                />
+                <PasswordRequirement
+                  met={HAS_SPECIAL.test(password)}
+                  text="At least one special character (!@#$%^&*...)"
                 />
               </View>
             )}
@@ -371,7 +436,7 @@ export default function LoginScreen() {
                 <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <Text style={styles.submitButtonText}>
-                  {authMode === "signup" ? "Create Account" : "Sign In"}
+                  {authMode === "signup" ? "Get Started" : "Sign In"}
                 </Text>
               )}
             </Pressable>
@@ -394,9 +459,15 @@ export default function LoginScreen() {
           {/* Terms */}
           <Text style={[styles.terms, { color: appColors.textTertiary }]}>
             By continuing, you agree to our{" "}
-            <Text style={[styles.termsLink, { color: appColors.primary }]}>Terms of Service</Text>
+            <Text
+              style={[styles.termsLink, { color: appColors.primary }]}
+              onPress={() => Linking.openURL("https://daywiseapp.com/terms")}
+            >Terms of Service</Text>
             {" "}and{" "}
-            <Text style={[styles.termsLink, { color: appColors.primary }]}>Privacy Policy</Text>
+            <Text
+              style={[styles.termsLink, { color: appColors.primary }]}
+              onPress={() => Linking.openURL("https://daywiseapp.com/privacy")}
+            >Privacy Policy</Text>
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -404,15 +475,14 @@ export default function LoginScreen() {
   );
 }
 
-// Password validation helper
+// Password validation helper — criteria must match the Supabase password strength policy
 function getPasswordErrors(password: string): string[] {
   const errors: string[] = [];
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    errors.push("Too short");
-  }
-  if (!/[0-9]/.test(password)) {
-    errors.push("No number");
-  }
+  if (password.length < MIN_PASSWORD_LENGTH) errors.push("Too short");
+  if (!HAS_LOWERCASE.test(password)) errors.push("No lowercase letter");
+  if (!HAS_UPPERCASE.test(password)) errors.push("No uppercase letter");
+  if (!HAS_NUMBER.test(password)) errors.push("No number");
+  if (!HAS_SPECIAL.test(password)) errors.push("No special character");
   return errors;
 }
 
@@ -450,20 +520,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 40,
   },
-  logo: {
-    fontSize: 64,
-    marginBottom: 12,
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: "700",
-    color: COLORS.primary,
-    marginBottom: 8,
+  headline: {
+    fontSize: 34,
+    fontWeight: "800",
+    textAlign: "center",
+    lineHeight: 42,
+    marginBottom: 10,
   },
   tagline: {
-    fontSize: 16,
-    color: COLORS.textSecondary,
+    fontSize: 15,
     textAlign: "center",
+    letterSpacing: 0.2,
+    lineHeight: 22,
+    fontWeight: "400",
   },
   formContainer: {
     marginBottom: 24,
@@ -574,6 +643,16 @@ const styles = StyleSheet.create({
   toggleLink: {
     fontSize: 14,
     fontWeight: "600",
+    color: COLORS.primary,
+  },
+  forgotPassword: {
+    alignSelf: "flex-end",
+    marginTop: -4,
+    marginBottom: 12,
+  },
+  forgotPasswordText: {
+    fontSize: 13,
+    fontWeight: "500",
     color: COLORS.primary,
   },
   terms: {

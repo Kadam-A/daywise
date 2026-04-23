@@ -13,7 +13,8 @@ import { addDays, addMonths, getDay, format, startOfDay } from "date-fns";
  */
 export function generateNextInstance(
   parentTask: Task,
-  completedInstanceDate?: string
+  completedInstanceDate?: string,
+  instanceCount?: number
 ): Partial<Task> | null {
   if (!parentTask.is_recurring || !parentTask.recurrence_rule) {
     return null;
@@ -44,6 +45,13 @@ export function generateNextInstance(
     return null;
   }
 
+  // Stop generating if end_count reached
+  if (rule.end_count !== undefined && instanceCount !== undefined) {
+    if (instanceCount >= rule.end_count) {
+      return null;
+    }
+  }
+
   // Preserve the due_date offset relative to the completed instance date.
   // e.g. task started Monday, due Friday (4-day window) → next instance keeps that 4-day gap.
   // Only computable when both values are known; omit otherwise to avoid false deadlines.
@@ -52,8 +60,9 @@ export function generateNextInstance(
   if (parentTask.due_date && completedInstanceDate) {
     const offsetMs =
       new Date(parentTask.due_date).getTime() - new Date(completedInstanceDate).getTime();
-    const instanceDateUTC = new Date(format(nextDate, "yyyy-MM-dd") + "T00:00:00.000Z");
-    nextDueDate = new Date(instanceDateUTC.getTime() + offsetMs).toISOString();
+    // Use local midnight (startOfDay) — avoids UTC-midnight drift for non-UTC users
+    const instanceDateLocal = startOfDay(nextDate);
+    nextDueDate = new Date(instanceDateLocal.getTime() + offsetMs).toISOString();
   }
 
   // Return the new instance data (without id, created_at, etc.)
@@ -118,22 +127,30 @@ export function isRecurringTemplate(task: Task): boolean {
  * Get human-readable recurrence description
  */
 export function getRecurrenceDescription(rule: RecurrenceRule): string {
+  let base: string;
+
   switch (rule.frequency) {
     case "daily":
-      return "Repeats daily";
+      base = "Repeats daily";
+      break;
 
     case "weekly":
       if (!rule.days || rule.days.length === 0) {
-        return "Repeats weekly";
+        base = "Repeats weekly";
+      } else {
+        const dayNames = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        const dayList = rule.days.map((d) => dayNames[d]).join(", ");
+        base = `Repeats ${dayList}`;
       }
-      const dayNames = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-      const dayList = rule.days.map((d) => dayNames[d]).join(", ");
-      return `Repeats ${dayList}`;
+      break;
 
     case "monthly":
-      return "Repeats monthly";
+      base = "Repeats monthly";
+      break;
 
     default:
-      return "Repeats";
+      base = "Repeats";
   }
+
+  return rule.end_count ? `${base} • ${rule.end_count}×` : base;
 }

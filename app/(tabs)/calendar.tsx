@@ -13,7 +13,7 @@ import {
 } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useFocusEffect } from "expo-router";
 import { supabase } from "@/lib/supabase";
@@ -38,6 +38,7 @@ import WeekTimeline, { DayCount } from "@/components/WeekTimeline";
 import ErrorState from "@/components/ErrorState";
 import { useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
+import { trackTaskRescheduled } from "@/lib/analytics";
 import TourTooltip from "@/components/TourTooltip";
 import TourPulseDot from "@/components/TourPulseDot";
 
@@ -59,7 +60,12 @@ type ViewMode = "day" | "week" | "month";
 
 export default function CalendarScreen() {
   const appColors = useAppColors();
-  const { tourStep, advanceTour, skipTour } = useGuidedTour();
+  const { tourStep, advanceTour, skipTour: _skipTour } = useGuidedTour();
+  const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
+  // Ref so useFocusEffect can read tourStep without it as a dependency
+  const tourStepRef = useRef(tourStep);
+  useEffect(() => { tourStepRef.current = tourStep; }, [tourStep]);
+  const params = useLocalSearchParams<{ date?: string; view?: string }>();
   const [viewMode, setViewMode] = useState<ViewMode>("week");
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [currentWeek, setCurrentWeek] = useState(
@@ -84,21 +90,27 @@ export default function CalendarScreen() {
   } | null>(null);
   const undoOpacity = useRef(new RNAnimated.Value(0)).current;
 
-  // Load data on focus
+  // Load data on focus; apply navigation params (date/view) if provided.
+  // tourStep intentionally excluded from deps — use ref to avoid re-running
+  // the effect (and re-loading data) on every tour step change.
   useFocusEffect(
     useCallback(() => {
       loadData();
-    }, [])
+      if (params.date) {
+        const target = new Date(params.date);
+        setSelectedDate(target);
+        setCurrentWeek(startOfWeek(target, { weekStartsOn: 1 }));
+        setCurrentMonth(startOfMonth(target));
+      }
+      if (params.view === "day" || params.view === "week" || params.view === "month") {
+        setViewMode(params.view);
+      } else if (tourStepRef.current === "tour_calendar_views") {
+        // Start in day view during tour so the Week tab pulse dot is visible
+        setViewMode("day");
+      }
+    }, [params.date, params.view])
   );
 
-  // Auto-advance tour when calendar tab is opened from home
-  useFocusEffect(
-    useCallback(() => {
-      if (tourStep === "tour_go_calendar") {
-        advanceTour("tour_calendar_intro");
-      }
-    }, [tourStep])
-  );
 
   const loadData = async () => {
     try {
@@ -224,6 +236,8 @@ export default function CalendarScreen() {
           due_date: newDueDate,
         })
         .eq("id", task.id);
+
+      trackTaskRescheduled('drag'); // fire-and-forget
 
       // Update Google Calendar if connected
       if (task.google_event_id) {
@@ -352,8 +366,11 @@ export default function CalendarScreen() {
             <View style={[styles.todayDot, { backgroundColor: appColors.primary }]} />
             <Text style={[styles.todayPillText, { color: appColors.textPrimary }]}>Today</Text>
           </Pressable>
-          {(tourStep === "tour_calendar_views") && (
-            <TourPulseDot visible color={appColors.primary} size={8} />
+          <View style={{ position: 'relative', flex: 1 }}>
+          {tourStep === "tour_calendar_views" && (
+            <View style={{ position: 'absolute', top: -4, left: '50%', marginLeft: -4, zIndex: 10 }}>
+              <TourPulseDot visible color={appColors.primary} size={8} />
+            </View>
           )}
           <SegmentedButtons
             value={viewMode}
@@ -396,6 +413,7 @@ export default function CalendarScreen() {
               },
             }}
           />
+          </View>
         </View>
       </View>
 
@@ -486,24 +504,16 @@ export default function CalendarScreen() {
 
       {/* Tour Tooltips */}
       <TourTooltip
-        visible={tourStep === "tour_calendar_intro"}
+        visible={tourStep === "tour_calendar_views"}
         icon="calendar-blank-outline"
         iconColor={appColors.primary}
         title="Your complete schedule"
-        body="Every task sits at its scheduled slot. Switch views to get the detail you need."
+        body="Every task sits at its scheduled slot. Day shows a timeline, Week gives a 7-day overview. Tap Week to try it."
         ctaLabel="Got it"
-        onCta={() => advanceTour("tour_calendar_views")}
-        onSkip={skipTour}
-        showSkip
-      />
-      <TourTooltip
-        visible={tourStep === "tour_calendar_views"}
-        icon="view-grid-outline"
-        iconColor={appColors.primary}
-        title="Switch your view"
-        body="Day shows an hour-by-hour timeline. Week gives a 7-day overview. Month shows the full picture."
-        ctaLabel="Got it"
-        onCta={() => advanceTour("tour_calendar_drag")}
+        onCta={() => {
+          setViewMode("week");
+          advanceTour("tour_calendar_drag");
+        }}
         onSkip={skipTour}
         showSkip
       />
@@ -514,17 +524,8 @@ export default function CalendarScreen() {
         title="Drag to reschedule"
         body="Press and hold any task block, then drag it to a new time. An undo toast lets you reverse it instantly."
         ctaLabel="Got it"
-        onCta={() => advanceTour("tour_go_settings")}
-        onSkip={skipTour}
-        showSkip
-      />
-      <TourTooltip
-        visible={tourStep === "tour_go_settings"}
-        icon="cog-outline"
-        iconColor={appColors.primary}
-        title="One last stop — Settings"
-        body="Tap the Settings tab to configure work hours, notifications, and AI preferences."
-        ctaLabel="Go to Settings"
+        position="top"
+        topOffset={60}
         onCta={() => {
           advanceTour("tour_settings_intro");
           router.push("/(tabs)/settings");

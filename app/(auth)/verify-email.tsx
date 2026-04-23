@@ -44,17 +44,21 @@ export default function VerifyEmailScreen() {
     }
   }, [resendCooldown]);
 
-  // Check if user has verified (poll every 3 seconds)
+  // Check if user has verified (poll every 4 seconds via API call)
   useEffect(() => {
+    let navigated = false;
+
     const checkVerification = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user?.email_confirmed_at) {
-        // User verified, go to onboarding
+      if (navigated) return;
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user?.email_confirmed_at) {
+        navigated = true;
+        clearInterval(interval);
         router.replace("/(auth)/onboarding");
       }
     };
 
-    const interval = setInterval(checkVerification, 3000);
+    const interval = setInterval(checkVerification, 4000);
     return () => clearInterval(interval);
   }, []);
 
@@ -68,12 +72,14 @@ export default function VerifyEmailScreen() {
       const { error } = await supabase.auth.resend({
         type: "signup",
         email,
+        options: {
+          emailRedirectTo: "daywise://auth/callback",
+        },
       });
 
       if (error) throw error;
 
       setMessage({ type: "success", text: "Verification email sent!" });
-      setResendCooldown(RESEND_COOLDOWN);
     } catch (err) {
       console.error("[VerifyEmail] Resend error:", err);
       setMessage({
@@ -82,6 +88,7 @@ export default function VerifyEmailScreen() {
       });
     } finally {
       setIsResending(false);
+      setResendCooldown(RESEND_COOLDOWN);
     }
   };
 

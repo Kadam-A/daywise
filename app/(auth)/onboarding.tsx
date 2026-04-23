@@ -23,42 +23,46 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useState, useEffect, useRef, useMemo } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import DateTimePicker from "@react-native-community/datetimepicker";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
-import { trackOnboardingCompleted, trackOnboardingStep } from "@/lib/analytics";
+import { trackOnboardingCompleted, trackOnboardingStep, trackOnboardingScreenViewed, trackOnboardingAbandoned } from "@/lib/analytics";
+import { createDemoTasks } from "@/lib/tourDemo";
 import { useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
+import { useSubscription } from "@/contexts/SubscriptionContext";
+import { startFreeTrial } from "@/lib/purchases";
 
 // ─── Feature Screens ──────────────────────────────────────────────────────────
 
 const FEATURES = [
   {
-    emoji: "🤖",
-    headline: "AI finds your perfect time",
-    sub: "Tell DayWise what you need to do — it scores dozens of time slots against your energy patterns and recommends the best one with a clear explanation.",
+    icon: "brain",
+    headline: "It thinks so you don't have to.",
+    sub: "Tell DayWise what you need to get done. It scores your available time against your energy patterns and picks the slot where you'll actually do your best work.",
     bullets: [
-      { icon: "⚡", text: "Matches every task to your peak focus hours" },
-      { icon: "📊", text: "Scores each slot with a personalised reason" },
-      { icon: "🔄", text: "Improves as it learns your habits over time" },
+      { icon: "lightning-bolt", text: "Matched to your peak focus hours every time" },
+      { icon: "chart-bar", text: "Explains exactly why it chose each slot" },
+      { icon: "trending-up", text: "Learns your habits and improves every week" },
     ],
   },
   {
-    emoji: "🗓️",
-    headline: "See your day, week, or month",
-    sub: "Switch between three views to get the exact level of detail you need — from a tight daily timeline to a big-picture monthly overview.",
+    icon: "calendar-month",
+    headline: "Your whole week, at a glance.",
+    sub: "Switch between day, week, and month views to see exactly where your time is going and where you have room to breathe.",
     bullets: [
-      { icon: "📋", text: "Day view — hour-by-hour timeline of your tasks" },
-      { icon: "📆", text: "Week view — spot gaps and busy days at a glance" },
-      { icon: "🗓️", text: "Month view — plan ahead and see the full picture" },
+      { icon: "view-list", text: "Day view: your tasks laid out hour by hour" },
+      { icon: "calendar-week", text: "Week view: spot gaps and crunch days instantly" },
+      { icon: "calendar-month-outline", text: "Month view: plan ahead without the guesswork" },
     ],
   },
   {
-    emoji: "⚡",
-    headline: "Smart recovery when life happens",
-    sub: "DayWise knows the difference between missing a time slot and missing a deadline — and handles each one differently.",
+    icon: "shield-refresh",
+    headline: "Life changes. Your plan keeps up.",
+    sub: "Missed a slot? Behind on a deadline? DayWise handles both differently and fixes them automatically so nothing falls through the cracks.",
     bullets: [
-      { icon: "🔁", text: "Missed your slot but due date is fine? AI auto-reschedules it to your next free time — no action needed" },
-      { icon: "🚨", text: "Past the due date? Bulk-reschedule all overdue tasks in one tap and the AI finds new times for all of them" },
-      { icon: "✅", text: "Completed tasks track your streak and progress over time" },
+      { icon: "calendar-sync", text: "Missed a slot? Auto-rescheduled before you even notice" },
+      { icon: "alert-circle-outline", text: "Overdue pile? Clear it all in a single tap" },
+      { icon: "check-circle-outline", text: "Every completion tracked. Your streak grows with you." },
     ],
   },
 ];
@@ -81,64 +85,64 @@ const PEAK_WINDOW_OPTIONS: { label: string; description: string; value: PeakWind
 const QUESTIONS = [
   {
     key: "peak_windows",
-    preamble: "First, let me learn your natural energy rhythms.",
-    question: "When do you feel most energised and focused?",
+    preamble: "Let's start with what makes you tick.",
+    question: "When do you actually do your best work?",
     options: [] as Option[], // handled separately (multi-select)
   },
   {
     key: "focusDuration",
-    preamble: "I'll use this to size your work blocks perfectly.",
-    question: "How long can you focus before needing a break?",
+    preamble: "Think about a single stretch of work. Sitting down and going deep on one thing.",
+    question: "How long before you naturally want to stop?",
     options: [
-      { label: "15–25 minutes", value: 15, description: "Short focused bursts" },
-      { label: "30–45 minutes", value: 35, description: "Pomodoro-style sessions" },
-      { label: "1–2 hours", value: 60, description: "Solid work blocks" },
-      { label: "2–3 hours", value: 85, description: "Deep focus sessions" },
-      { label: "3+ hours", value: 100, description: "Extended deep work" },
+      { label: "15–25 minutes", value: 15, description: "Short, sharp bursts" },
+      { label: "30–45 minutes", value: 35, description: "Pomodoro-style" },
+      { label: "1–2 hours", value: 60, description: "Solid blocks of focus" },
+      { label: "2–3 hours", value: 85, description: "Deep work sessions" },
+      { label: "3+ hours", value: 100, description: "I can go all day" },
     ],
   },
   {
     key: "deadlineStyle",
-    preamble: "This helps me know how much buffer time you need.",
-    question: "How do you work best with deadlines?",
+    preamble: "No judgment here. Everyone has their thing.",
+    question: "When do you honestly tend to start things?",
     options: [
-      { label: "Start immediately", value: 10, description: "I like having buffer time" },
-      { label: "Steady progress", value: 40, description: "Spread work evenly" },
-      { label: "Closer to deadline", value: 70, description: "Some pressure helps" },
-      { label: "Right before deadline", value: 95, description: "I thrive under pressure" },
+      { label: "Right away", value: 10, description: "Buffer time keeps me calm" },
+      { label: "Steady progress", value: 40, description: "I spread it out evenly" },
+      { label: "Closer to the date", value: 70, description: "A bit of pressure helps" },
+      { label: "Last minute", value: 95, description: "Deadlines are my fuel" },
     ],
   },
   {
     key: "breakFrequency",
-    preamble: "I'll plan rest between sessions automatically.",
-    question: "How often do you need breaks?",
+    preamble: "Now zoom out to your whole day. Not one session, the full thing.",
+    question: "How often do you need a proper step-away break?",
     options: [
-      { label: "Every 15–20 minutes", value: 10, description: "Frequent short breaks" },
-      { label: "Every 30–45 minutes", value: 35, description: "Regular breaks" },
-      { label: "Every 1–2 hours", value: 65, description: "Occasional breaks" },
-      { label: "Every 2–3+ hours", value: 90, description: "Minimal breaks needed" },
+      { label: "Very often", value: 10, description: "I need to reset regularly" },
+      { label: "Every hour or so", value: 35, description: "A few good breaks a day" },
+      { label: "A couple of times", value: 65, description: "Morning and afternoon" },
+      { label: "Barely at all", value: 90, description: "I just keep going" },
     ],
   },
   {
     key: "taskSwitching",
-    preamble: "I'll avoid splitting related work across separate times.",
-    question: "How do you prefer to work on tasks?",
+    preamble: "Think about how you naturally move through your workload.",
+    question: "Do you stay locked on one thing, or jump between several?",
     options: [
-      { label: "One task until done", value: 10, description: "Single-minded focus" },
-      { label: "A few related tasks", value: 40, description: "Some variety is good" },
-      { label: "Mix of different tasks", value: 70, description: "Variety keeps me engaged" },
-      { label: "Frequently switch", value: 95, description: "I like juggling multiple things" },
+      { label: "One at a time", value: 10, description: "Finish, then move on" },
+      { label: "A few related things", value: 40, description: "Rotate when stuck" },
+      { label: "Mix it up often", value: 70, description: "Variety keeps me sharp" },
+      { label: "Always multitasking", value: 95, description: "More going, more energy" },
     ],
   },
   {
     key: "structurePreference",
-    preamble: "Last one! I'll build a schedule style that feels natural.",
-    question: "How structured do you like your schedule?",
+    preamble: "Last one. I promise.",
+    question: "Do you like having a predictable daily routine?",
     options: [
-      { label: "Very structured", value: 10, description: "Exact times for everything" },
-      { label: "Mostly structured", value: 35, description: "Planned with some flex" },
-      { label: "Somewhat flexible", value: 65, description: "General plan, adapt as needed" },
-      { label: "Very flexible", value: 90, description: "Go with the flow" },
+      { label: "Yes, same pattern every day", value: 10, description: "Consistency helps me focus" },
+      { label: "Mostly, with some variety", value: 35, description: "A familiar rhythm is nice" },
+      { label: "Not really", value: 65, description: "Depends what each day brings" },
+      { label: "No, every day is different", value: 90, description: "I adapt as things come up" },
     ],
   },
 ];
@@ -249,7 +253,7 @@ function PeakWindowsPicker({
         When do you feel most energised and focused?
       </Text>
       <Text style={[{ color: appColors.textSecondary, fontSize: 13, marginBottom: 16 }]}>
-        Select 1 or 2 windows
+        Pick 1 or 2 that feel right
       </Text>
       <View style={styles.peakWindowsGrid}>
         {PEAK_WINDOW_OPTIONS.map((opt) => {
@@ -348,6 +352,19 @@ function ProgressHeader({
   );
 }
 
+// ─── Hero Icon ────────────────────────────────────────────────────────────────
+
+function HeroIcon({ name, appColors }: { name: string; appColors: any }) {
+  return (
+    <MaterialCommunityIcons
+      name={name as any}
+      size={52}
+      color={appColors.primary}
+      style={styles.heroIcon}
+    />
+  );
+}
+
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 
 // Step map:
@@ -364,7 +381,8 @@ const COMPLETION_STEP = 11;
 
 export default function OnboardingScreen() {
   const appColors = useAppColors();
-  const { advanceTour } = useGuidedTour();
+  const { advanceTour, skipTour } = useGuidedTour();
+  const { refresh: refreshSubscription } = useSubscription();
   const { retake } = useLocalSearchParams<{ retake?: string }>();
   const isRetake = retake === "true";
   const [currentStep, setCurrentStep] = useState(isRetake ? QUESTION_START : 0);
@@ -388,6 +406,20 @@ export default function OnboardingScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Track screen views for analytics
+  useEffect(() => {
+    const names: Record<number, string> = {
+      0: "welcome",
+      1: "feature_ai",
+      2: "feature_calendar",
+      3: "feature_recovery",
+      10: "work_hours",
+      11: "completion",
+    };
+    const name = names[currentStep] ?? `question_${currentStep - QUESTION_START}`;
+    trackOnboardingScreenViewed(currentStep, name).catch(() => {});
+  }, [currentStep]);
+
   // Slide animation
   const slideAnim = useRef(new Animated.Value(0)).current;
   const prevStep = useRef(0);
@@ -407,6 +439,11 @@ export default function OnboardingScreen() {
   const goBack = () => {
     if (isRetake && currentStep === QUESTION_START) {
       router.back();
+    } else if (currentStep === 0) {
+      const names: Record<number, string> = { 0: 'welcome', 1: 'feature_ai', 2: 'feature_calendar', 3: 'feature_recovery', 10: 'work_hours', 11: 'completion' };
+      const name = names[currentStep] ?? `question_${currentStep - QUESTION_START}`;
+      trackOnboardingAbandoned(currentStep, name).catch(() => {});
+      router.back();
     } else {
       animateToStep(currentStep - 1);
     }
@@ -424,7 +461,10 @@ export default function OnboardingScreen() {
 
   const handleQuestionNext = () => {
     if (!currentQ) return;
-    trackOnboardingStep(currentStep, currentQ.key).catch(() => {});
+    const answerValue = currentQ.key === 'peak_windows'
+      ? peakWindows.join(',')
+      : String(answers[currentQ.key] ?? '');
+    trackOnboardingStep(currentStep, currentQ.key, answerValue).catch(() => {});
     goNext();
   };
 
@@ -483,8 +523,44 @@ export default function OnboardingScreen() {
     }
   };
 
-  const handleStartTour = async () => {
+  const [trialStarting, setTrialStarting] = useState(false);
+  const [trialStarted, setTrialStarted] = useState(false);
+
+  const handleStartTrial = async () => {
+    setTrialStarting(true);
+    try {
+      const result = await startFreeTrial();
+      if (result.success) {
+        await refreshSubscription(); // so home screen sees isTrialing=true immediately
+        setTrialStarted(true);
+      }
+    } catch {
+      // Still show choice screen — trial may have worked
+      await refreshSubscription();
+      setTrialStarted(true);
+    } finally {
+      setTrialStarting(false);
+    }
+  };
+
+  const [choosingTour, setChoosingTour] = useState(false);
+  const [choosingExplore, setChoosingExplore] = useState(false);
+
+  const handleChooseTour = async () => {
+    setChoosingTour(true);
     await advanceTour("tour_welcome");
+    await createDemoTasks();
+    router.replace("/(tabs)/home");
+  };
+
+  const handleChooseExplore = async () => {
+    setChoosingExplore(true);
+    await skipTour();
+    router.replace("/(tabs)/home");
+  };
+
+  const handleSkipTrial = async () => {
+    await skipTour();
     router.replace("/(tabs)/home");
   };
 
@@ -496,24 +572,24 @@ export default function OnboardingScreen() {
       <SafeAreaView style={[styles.container, { backgroundColor: appColors.surface }]}>
         <ScrollView contentContainerStyle={styles.welcomeContent} showsVerticalScrollIndicator={false}>
           <View style={styles.welcomeHero}>
-            <Text style={styles.welcomeEmoji}>⏱</Text>
+            <HeroIcon name="calendar-clock" appColors={appColors} />
             <Text style={[styles.welcomeHeadline, { color: appColors.textPrimary }]}>
-              Stop guessing{"\n"}when to work.
+              Your work,{"\n"}finally in order.
             </Text>
             <Text style={[styles.welcomeSub, { color: appColors.textSecondary }]}>
-              DayWise is an AI scheduler that learns{"\n"}when you focus best — then plans your day{"\n"}around you automatically.
+              Most people lose hours every week just deciding when to do things. DayWise plans it for you. In seconds.
             </Text>
           </View>
 
-          <View style={[styles.bulletCard, { backgroundColor: appColors.primaryLight, borderColor: `${appColors.primary}30` }]}>
+          <View style={[styles.bulletCard, { backgroundColor: appColors.primaryLight, borderColor: `${appColors.primary}20` }]}>
             {[
-              { icon: "🧠", text: "AI that adapts to your rhythm" },
-              { icon: "⏱", text: "Zero time wasted deciding when" },
-              { icon: "✅", text: "Never miss a deadline again" },
-              { icon: "🗓️", text: "Day, week & month views built in" },
+              { icon: "brain", text: "Learns when you focus best, automatically" },
+              { icon: "clock-fast", text: "Picks the right time so you don't have to" },
+              { icon: "calendar-refresh", text: "Reschedules missed tasks without you lifting a finger" },
+              { icon: "trending-up", text: "Gets sharper every week you use it" },
             ].map((b) => (
               <View key={b.text} style={styles.bulletRow}>
-                <Text style={styles.bulletIcon}>{b.icon}</Text>
+                <MaterialCommunityIcons name={b.icon as any} size={20} color={appColors.primary} style={styles.bulletIconView} />
                 <Text style={[styles.bulletText, { color: appColors.textPrimary }]}>{b.text}</Text>
               </View>
             ))}
@@ -522,8 +598,9 @@ export default function OnboardingScreen() {
 
         <View style={[styles.footer, { borderTopColor: appColors.border }]}>
           <Button mode="contained" onPress={goNext} style={styles.ctaButton} contentStyle={styles.ctaContent} labelStyle={styles.ctaLabel}>
-            See How It Works →
+            Show me how it works →
           </Button>
+          <Text style={[styles.footerHint, { color: appColors.textTertiary }]}>Takes 2 minutes to set up</Text>
         </View>
       </SafeAreaView>
     );
@@ -551,14 +628,14 @@ export default function OnboardingScreen() {
 
         <Animated.View style={[styles.flex, { transform: [{ translateX: slideAnim }] }]}>
           <ScrollView contentContainerStyle={styles.featureContent} showsVerticalScrollIndicator={false}>
-            <Text style={styles.featureEmoji}>{feature.emoji}</Text>
+            <HeroIcon name={feature.icon} appColors={appColors} />
             <Text style={[styles.featureHeadline, { color: appColors.textPrimary }]}>{feature.headline}</Text>
             <Text style={[styles.featureSub, { color: appColors.textSecondary }]}>{feature.sub}</Text>
 
             <View style={[styles.featureBulletCard, { backgroundColor: appColors.primaryLight, borderColor: `${appColors.primary}25` }]}>
               {feature.bullets.map((b) => (
                 <View key={b.text} style={styles.bulletRow}>
-                  <Text style={styles.bulletIcon}>{b.icon}</Text>
+                  <MaterialCommunityIcons name={b.icon as any} size={20} color={appColors.primary} style={styles.bulletIconView} />
                   <Text style={[styles.bulletText, { color: appColors.textPrimary }]}>{b.text}</Text>
                 </View>
               ))}
@@ -568,7 +645,7 @@ export default function OnboardingScreen() {
           <View style={[styles.footer, { borderTopColor: appColors.border }]}>
             <View style={styles.footerRow}>
               <Pressable onPress={goBack} style={styles.ghostBack} hitSlop={8}>
-                <Text style={[styles.ghostBackText, { color: appColors.textSecondary }]}>←</Text>
+                <MaterialCommunityIcons name="arrow-left" size={24} color={appColors.textSecondary} />
               </Pressable>
               <Button
                 mode="contained"
@@ -577,8 +654,13 @@ export default function OnboardingScreen() {
                 contentStyle={styles.ctaContent}
                 labelStyle={styles.ctaLabel}
               >
-                {currentStep === 3 ? "Personalise My AI →" : "Next →"}
+                {currentStep === 3 ? "Make it mine →" : "Next →"}
               </Button>
+              {currentStep < 3 && (
+                <Pressable onPress={() => animateToStep(QUESTION_START)} style={styles.skipBtn} hitSlop={8}>
+                  <Text style={[styles.skipText, { color: appColors.textTertiary }]}>Skip</Text>
+                </Pressable>
+              )}
             </View>
           </View>
         </Animated.View>
@@ -651,10 +733,10 @@ export default function OnboardingScreen() {
         <Animated.View style={[styles.flex, { transform: [{ translateX: slideAnim }] }]}>
           <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
             <Text style={[styles.questionText, { color: appColors.textPrimary, marginBottom: 8 }]}>
-              When is your workday?
+              When does your day start and end?
             </Text>
             <Text style={[styles.preamble, { color: appColors.textSecondary, marginBottom: 28 }]}>
-              I'll only schedule tasks within these hours by default. You can change this anytime in Settings.
+              I'll keep everything inside these hours. You can shift them anytime in Settings.
             </Text>
 
             <TimePickerRow label="Work starts" value={workStart} onChange={setWorkStart} />
@@ -669,9 +751,11 @@ export default function OnboardingScreen() {
               onPress={handleComplete}
               style={styles.ctaButton}
               contentStyle={styles.ctaContent}
+              labelStyle={styles.ctaLabel}
+              loading={loading}
               disabled={loading}
             >
-              {loading ? <ActivityIndicator size="small" color="#fff" /> : "Finish Setup →"}
+              Finish Setup →
             </Button>
           </View>
         </Animated.View>
@@ -679,26 +763,152 @@ export default function OnboardingScreen() {
     );
   }
 
-  // ── Step 11: Completion ──────────────────────────────────────────────────────
+  // ── Step 11: Trial opt-in / choice ──────────────────────────────────────────
+  // Phase 2: Trial started — choose experience
+  if (trialStarted) {
+    return (
+      <SafeAreaView style={[styles.container, { backgroundColor: appColors.surface }]}>
+        <Confetti />
+        <ScrollView contentContainerStyle={{ padding: 28, paddingTop: 48, flexGrow: 1 }} showsVerticalScrollIndicator={false}>
+          <View style={{ alignItems: "center", marginBottom: 32 }}>
+            <Text style={{ fontSize: 40, marginBottom: 12 }}>🎉</Text>
+            <Text style={[styles.completionHeadline, { color: appColors.textPrimary, textAlign: "center" }]}>
+              Your Pro trial is active
+            </Text>
+            <Text style={[styles.completionSub, { color: appColors.textSecondary, textAlign: "center" }]}>
+              7 days of everything, free. How would you like to get started?
+            </Text>
+          </View>
+
+          {/* Option A: Tour */}
+          <Pressable
+            onPress={handleChooseTour}
+            disabled={choosingTour || choosingExplore}
+            style={[{
+              borderRadius: 16, padding: 20, marginBottom: 12,
+              borderWidth: 2, borderColor: appColors.primary,
+              backgroundColor: appColors.primaryLight,
+            }]}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }}>
+              {choosingTour
+                ? <ActivityIndicator size={20} color={appColors.primary} />
+                : <MaterialCommunityIcons name="map-marker-path" size={24} color={appColors.primary} />}
+              <Text style={{ fontSize: 17, fontWeight: "700", color: appColors.primary }}>Show me around</Text>
+            </View>
+            <Text style={{ fontSize: 14, color: appColors.textSecondary, lineHeight: 20 }}>
+              A quick guided walkthrough. I'll create some tasks and show you exactly how AI and manual scheduling work together.
+            </Text>
+          </Pressable>
+
+          {/* Option B: Feature list */}
+          <Pressable
+            onPress={handleChooseExplore}
+            disabled={choosingTour || choosingExplore}
+            style={[{
+              borderRadius: 16, padding: 20, marginBottom: 32,
+              borderWidth: 1, borderColor: appColors.border,
+              backgroundColor: appColors.surface,
+            }]}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }}>
+              {choosingExplore
+                ? <ActivityIndicator size={20} color={appColors.textPrimary} />
+                : <MaterialCommunityIcons name="rocket-launch-outline" size={24} color={appColors.textPrimary} />}
+              <Text style={{ fontSize: 17, fontWeight: "700", color: appColors.textPrimary }}>I'll explore myself</Text>
+            </View>
+            <Text style={{ fontSize: 14, color: appColors.textSecondary, lineHeight: 20 }}>
+              Jump straight in. Here's what you have access to for the next 7 days:
+            </Text>
+            <View style={{ marginTop: 12, gap: 8 }}>
+              {[
+                { icon: "brain", text: "AI scheduling — finds your best time automatically" },
+                { icon: "calendar-refresh", text: "Auto-reschedule — missed slots handled for you" },
+                { icon: "chart-line", text: "Advanced analytics — see your productivity patterns" },
+                { icon: "google", text: "Google Calendar sync — coming soon" },
+              ].map((f) => (
+                <View key={f.text} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <MaterialCommunityIcons name={f.icon as any} size={18} color={appColors.secondary} />
+                  <Text style={{ fontSize: 13, color: appColors.textSecondary, flex: 1 }}>{f.text}</Text>
+                </View>
+              ))}
+            </View>
+          </Pressable>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // Phase 1: Trial pitch
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: appColors.surface }]}>
-      <Confetti />
-      <View style={[styles.flex, styles.completionContainer]}>
-        <Text style={styles.completionEmoji}>🎉</Text>
-        <Text style={[styles.completionHeadline, { color: appColors.textPrimary }]}>Your AI is ready!</Text>
-        <Text style={[styles.completionSub, { color: appColors.textSecondary }]}>
-          I've learned your style. Let's schedule your first task and I'll show you exactly what I found.
-        </Text>
+      <ScrollView contentContainerStyle={{ padding: 28, paddingTop: 48, flexGrow: 1 }} showsVerticalScrollIndicator={false}>
+        <View style={{ alignItems: "center", marginBottom: 32 }}>
+          <View style={{
+            width: 80, height: 80, borderRadius: 40, marginBottom: 20,
+            backgroundColor: `${appColors.primary}15`,
+            alignItems: "center", justifyContent: "center",
+          }}>
+            <MaterialCommunityIcons name="star-circle-outline" size={44} color={appColors.primary} />
+          </View>
+          <Text style={[styles.completionHeadline, { color: appColors.textPrimary, textAlign: "center" }]}>
+            Try Pro free for 7 days
+          </Text>
+          <View style={{
+            flexDirection: "row", alignItems: "center", gap: 6,
+            marginTop: 10, backgroundColor: appColors.successLight,
+            paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20,
+          }}>
+            <MaterialCommunityIcons name="shield-check-outline" size={16} color={appColors.success} />
+            <Text style={{ fontSize: 13, fontWeight: "600", color: appColors.success }}>
+              No credit card required
+            </Text>
+          </View>
+        </View>
+
+        <View style={{ gap: 12, marginBottom: 32 }}>
+          {[
+            { icon: "brain", label: "AI Scheduling", desc: "Finds your perfect time slot automatically" },
+            { icon: "calendar-refresh", label: "Auto-Reschedule", desc: "Missed tasks moved for you without lifting a finger" },
+            { icon: "chart-line", label: "Advanced Analytics", desc: "See exactly when and how you work best" },
+            { icon: "google", label: "Google Calendar Sync", desc: "Coming soon" },
+          ].map((f) => (
+            <View key={f.label} style={{
+              flexDirection: "row", alignItems: "center", gap: 14,
+              backgroundColor: appColors.inputBg, borderRadius: 12, padding: 14,
+            }}>
+              <View style={{
+                width: 40, height: 40, borderRadius: 12,
+                backgroundColor: `${appColors.primary}15`,
+                alignItems: "center", justifyContent: "center",
+              }}>
+                <MaterialCommunityIcons name={f.icon as any} size={22} color={appColors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 14, fontWeight: "600", color: appColors.textPrimary }}>{f.label}</Text>
+                <Text style={{ fontSize: 12, color: appColors.textTertiary, marginTop: 1 }}>{f.desc}</Text>
+              </View>
+              <MaterialCommunityIcons name="check-circle" size={20} color={appColors.success} />
+            </View>
+          ))}
+        </View>
+
         <Button
           mode="contained"
-          onPress={handleStartTour}
-          style={[styles.ctaButton, { marginTop: 40, alignSelf: "stretch" }]}
+          onPress={handleStartTrial}
+          loading={trialStarting}
+          disabled={trialStarting}
+          style={[styles.ctaButton, { alignSelf: "stretch" }]}
           contentStyle={styles.ctaContent}
           labelStyle={styles.ctaLabel}
         >
-          Create Your First Task →
+          Start My Free Trial
         </Button>
-      </View>
+
+        <Pressable onPress={handleSkipTrial} style={{ alignItems: "center", marginTop: 16, paddingVertical: 8 }}>
+          <Text style={{ fontSize: 14, color: appColors.textTertiary }}>Skip for now — use the free version</Text>
+        </Pressable>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -715,25 +925,25 @@ const styles = StyleSheet.create({
     paddingTop: 24,
     paddingBottom: 16,
   },
+  heroIcon: {
+    marginBottom: 20,
+  },
   welcomeHero: {
     alignItems: "center",
     marginBottom: 32,
   },
-  welcomeEmoji: {
-    fontSize: 60,
-    marginBottom: 20,
-  },
   welcomeHeadline: {
-    fontSize: 32,
+    fontSize: 34,
     fontWeight: "800",
     textAlign: "center",
-    lineHeight: 40,
-    marginBottom: 14,
+    lineHeight: 42,
+    marginBottom: 12,
   },
   welcomeSub: {
     fontSize: 15,
     textAlign: "center",
-    lineHeight: 23,
+    lineHeight: 24,
+    paddingHorizontal: 4,
   },
 
   // Shared bullets
@@ -748,8 +958,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
   },
-  bulletIcon: {
-    fontSize: 20,
+  bulletIconView: {
     width: 28,
     textAlign: "center",
   },
@@ -778,17 +987,13 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     alignItems: "center",
   },
-  featureEmoji: {
-    fontSize: 64,
-    marginBottom: 20,
-    textAlign: "center",
-  },
   featureHeadline: {
-    fontSize: 26,
+    fontSize: 28,
     fontWeight: "800",
     textAlign: "center",
-    lineHeight: 34,
+    lineHeight: 36,
     marginBottom: 12,
+    marginTop: 16,
   },
   featureSub: {
     fontSize: 15,
@@ -812,8 +1017,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
-  ghostBackText: {
-    fontSize: 26,
+  skipBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  skipText: {
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  footerHint: {
+    textAlign: "center",
+    fontSize: 12,
+    marginTop: 8,
   },
 
   // Progress bar
@@ -955,10 +1170,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     padding: 32,
-  },
-  completionEmoji: {
-    fontSize: 72,
-    marginBottom: 24,
   },
   completionHeadline: {
     fontSize: 28,

@@ -72,12 +72,7 @@ const FAQ_SECTIONS: FAQSection[] = [
       {
         question: "What do the task states mean?",
         answer:
-          "Pending schedule — the task has been created but not yet given a time slot.\n\nScheduled — a time slot has been assigned.\n\nCompleted — you've marked the task as done.\n\nMissed — the scheduled time passed without the task being completed. Missed tasks are automatically rescheduled if auto-reschedule is enabled.",
-      },
-      {
-        question: "How do recurring tasks work?",
-        answer:
-          "When you enable 'Repeat this task' during creation, the app schedules each occurrence separately. For example, a weekly task creates a new instance every 7 days. Each instance can be scheduled independently — completing one doesn't affect future ones.",
+          "Pending schedule — the task has been created but not yet given a time slot.\n\nScheduled — a time slot has been assigned and it's coming up.\n\nCompleted — you've marked the task as done.\n\nMissed — the scheduled time slot passed but the due date is still in the future. The task can still be done on time — it just needs a new slot. Auto-reschedule will handle this automatically if enabled.\n\nOverdue — the due date itself has passed and the task is still incomplete. Unlike missed, overdue means the deadline is gone — these need your attention immediately.",
       },
       {
         question: "What is auto-reschedule?",
@@ -93,7 +88,7 @@ const FAQ_SECTIONS: FAQSection[] = [
       {
         question: "How does Google Calendar sync work?",
         answer:
-          "Once connected, DayWise imports your Google Calendar events as busy blocks. The AI scheduling engine will never suggest a slot that overlaps with one of these events. Your tasks are also added to Google Calendar as events when scheduled.",
+          "Coming soon — Google Calendar sync is currently in development. Once available, DayWise will import your Google Calendar events as busy blocks so the AI never schedules over existing commitments.",
       },
       {
         question: "What are the calendar views?",

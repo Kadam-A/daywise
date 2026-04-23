@@ -4,7 +4,7 @@
  * User preferences and account management
  */
 
-import { View, StyleSheet, ScrollView, Alert, Pressable, Platform, Modal as RNModal } from "react-native";
+import { View, StyleSheet, ScrollView, Alert, Pressable, Platform, Modal as RNModal, Animated, Linking } from "react-native";
 import {
   Text,
   List,
@@ -21,9 +21,10 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { useFocusEffect } from "expo-router";
 import { supabase, signOut } from "@/lib/supabase";
+import { getIANATimezone, getUTCOffsetHours } from "@/lib/timezone";
 import { useGoogleCalendarAuth } from "@/lib/google-calendar";
 import {
   requestNotificationPermissions,
@@ -38,6 +39,7 @@ import DateTimePicker from "@react-native-community/datetimepicker";
 import { FeedbackCategory } from "@/lib/types";
 import ComprehensiveFeedbackModal from "@/components/ComprehensiveFeedbackModal";
 import HelpFAQModal from "@/components/HelpFAQModal";
+import * as StoreReview from "expo-store-review";
 import { useAuth } from "@/contexts/AuthContext";
 import { useThemeMode, useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
@@ -58,8 +60,55 @@ const COLORS = {
   border: "#E5E7EB",
 };
 
+const CONFETTI_COLORS = ['#4A90E2', '#7C6FBF', '#5FBF73', '#F5A962', '#E25555', '#F472B6'];
+
+function TourCompleteConfetti() {
+  const particles = useMemo(() =>
+    Array.from({ length: 40 }, (_, i) => ({
+      id: i,
+      color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+      x: Math.random() * 380,
+      size: 6 + Math.random() * 8,
+      delay: i * 60,
+      duration: 1400 + Math.random() * 800,
+      translateY: new Animated.Value(-20),
+      opacity: new Animated.Value(0),
+    })), []);
+
+  useEffect(() => {
+    Animated.stagger(0, particles.map((p) =>
+      Animated.sequence([
+        Animated.delay(p.delay),
+        Animated.parallel([
+          Animated.timing(p.translateY, { toValue: 700, duration: p.duration, useNativeDriver: true }),
+          Animated.sequence([
+            Animated.timing(p.opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+            Animated.delay(p.duration - 400),
+            Animated.timing(p.opacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+          ]),
+        ]),
+      ])
+    )).start();
+  }, []);
+
+  return (
+    <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
+      {particles.map((p) => (
+        <Animated.View key={p.id} style={{
+          position: 'absolute', left: p.x, top: 0,
+          width: p.size, height: p.size, borderRadius: p.size / 4,
+          backgroundColor: p.color,
+          transform: [{ translateY: p.translateY }],
+          opacity: p.opacity,
+        }} />
+      ))}
+    </View>
+  );
+}
+
 export default function SettingsScreen() {
-  const { tourStep, advanceTour, skipTour } = useGuidedTour();
+  const { tourStep, advanceTour, skipTour: _skipTour } = useGuidedTour();
+  const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
   const { isPro } = useSubscription();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [reminderTime, setReminderTime] = useState(15);
@@ -118,20 +167,14 @@ export default function SettingsScreen() {
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
   const appColors = useAppColors();
 
-  // Load user profile and notification settings on mount
-  useEffect(() => {
-    loadProfile();
-    loadNotificationSettings();
-  }, []);
-
-  // Auto-advance tour when settings tab gets focus
+  // Reload profile every time the tab comes into focus (not just on mount)
   useFocusEffect(
     useCallback(() => {
-      if (tourStep === "tour_go_settings") {
-        advanceTour("tour_settings_intro");
-      }
-    }, [tourStep])
+      loadProfile();
+      loadNotificationSettings();
+    }, [])
   );
+
 
   const loadNotificationSettings = async () => {
     try {
@@ -183,13 +226,13 @@ export default function SettingsScreen() {
         setEmail(user.email);
       }
 
-      // Get profile for display name and personality data
+      // Get profile — select dedicated columns alongside personality_data
       const { data: profile } = await supabase
         .from("user_profiles")
-        .select("display_name, personality_data")
+        .select("display_name, personality_data, auto_reschedule_enabled, auto_reschedule_morning, auto_reschedule_evening")
         .single();
 
-      // Load work hours from personality_data
+      // Load work hours from personality_data (still stored there)
       const preferredWindows = profile?.personality_data?.preferred_windows;
       if (preferredWindows && preferredWindows.length > 0) {
         const window = preferredWindows[0];
@@ -199,15 +242,10 @@ export default function SettingsScreen() {
         setWorkEndHour(endH);
       }
 
-      // Load auto-reschedule settings (migrate old hour values → minutes)
-      const pd = profile?.personality_data;
-      const savedEnabled = pd?.auto_reschedule_enabled ?? true;
-      const savedMorning = pd?.auto_reschedule_morning !== undefined
-        ? (pd.auto_reschedule_morning < 24 ? pd.auto_reschedule_morning * 60 : pd.auto_reschedule_morning)
-        : 540;
-      const savedEvening = pd?.auto_reschedule_evening !== undefined
-        ? (pd.auto_reschedule_evening < 24 ? pd.auto_reschedule_evening * 60 : pd.auto_reschedule_evening)
-        : 1140;
+      // Load auto-reschedule from dedicated columns
+      const savedEnabled = profile?.auto_reschedule_enabled ?? true;
+      const savedMorning = profile?.auto_reschedule_morning ?? 540;
+      const savedEvening = profile?.auto_reschedule_evening ?? 1140;
 
       setAutoRescheduleEnabled(savedEnabled);
       setAutoRescheduleMorning(savedMorning);
@@ -297,11 +335,11 @@ export default function SettingsScreen() {
     // Double confirmation for safety
     Alert.alert(
       "Final Confirmation",
-      "Type DELETE to confirm you want to permanently delete your account.",
+      "This is your last chance. All tasks, schedules, and data will be gone forever.",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "I Understand, Delete",
+          text: "Yes, Delete Everything",
           style: "destructive",
           onPress: executeDeleteAccount,
         },
@@ -422,6 +460,7 @@ export default function SettingsScreen() {
       setWorkHoursModalVisible(false);
     } catch (error) {
       console.error("[Settings] Error saving work hours:", error);
+      Alert.alert("Save Failed", "Couldn't save work hours. Please try again.");
     } finally {
       setSavingWorkHours(false);
     }
@@ -432,24 +471,15 @@ export default function SettingsScreen() {
       setSavingAutoReschedule(true);
       const { data: { user } } = await supabase.auth.getUser();
 
-      const { data: profile } = await supabase
-        .from("user_profiles")
-        .select("personality_data")
-        .eq("id", user?.id)
-        .single();
-
-      const updatedPersonality = {
-        ...profile?.personality_data,
-        auto_reschedule_enabled: autoRescheduleEnabled,
-        auto_reschedule_morning: autoRescheduleMorning,
-        auto_reschedule_evening: autoRescheduleEvening,
-        // Capture device timezone so the Edge Function can convert UTC → local hour
-        auto_reschedule_tz_offset: -new Date().getTimezoneOffset() / 60,
-      };
-
       const { error } = await supabase
         .from("user_profiles")
-        .update({ personality_data: updatedPersonality })
+        .update({
+          auto_reschedule_enabled: autoRescheduleEnabled,
+          auto_reschedule_morning: autoRescheduleMorning,
+          auto_reschedule_evening: autoRescheduleEvening,
+          auto_reschedule_tz_name: getIANATimezone(),
+          auto_reschedule_tz_offset: getUTCOffsetHours(),
+        })
         .eq("id", user?.id);
 
       if (error) throw error;
@@ -460,6 +490,7 @@ export default function SettingsScreen() {
       setAutoRescheduleModalVisible(false);
     } catch (error) {
       console.error("[Settings] Error saving auto-reschedule settings:", error);
+      Alert.alert("Save Failed", "Couldn't save auto-reschedule settings. Please try again.");
     } finally {
       setSavingAutoReschedule(false);
     }
@@ -582,7 +613,7 @@ export default function SettingsScreen() {
           <List.Item
             title="Auto-Reschedule"
             description={!isPro
-              ? "1/week on free plan • Upgrade for unlimited"
+              ? "Pro feature • Upgrade to unlock"
               : autoRescheduleEnabled
                 ? `${formatTimeFromMinutes(autoRescheduleMorning)} and ${formatTimeFromMinutes(autoRescheduleEvening)}`
                 : "Disabled"}
@@ -590,7 +621,7 @@ export default function SettingsScreen() {
             right={(props) => (
               <List.Icon {...props} icon={isPro ? "chevron-right" : "lock-outline"} />
             )}
-            onPress={() => isPro ? setAutoRescheduleModalVisible(true) : router.push("/paywall")}
+            onPress={() => isPro ? setAutoRescheduleModalVisible(true) : router.push({ pathname: "/paywall", params: { source: "auto_reschedule" } })}
           />
           <List.Item
             title="Appearance"
@@ -694,13 +725,15 @@ export default function SettingsScreen() {
               description="Sync your calendar events"
               left={(props) => <List.Icon {...props} icon="google" />}
               right={() => (
-                <Chip
-                  mode="flat"
-                  textStyle={[styles.comingSoonChipText, { color: appColors.textTertiary }]}
-                  style={[styles.comingSoonChip, { backgroundColor: `${appColors.textTertiary}15` }]}
-                >
-                  Coming Soon
-                </Chip>
+                <View style={{ alignSelf: 'center', marginRight: 8 }}>
+                  <Chip
+                    mode="flat"
+                    textStyle={[styles.comingSoonChipText, { color: appColors.textTertiary }]}
+                    style={[styles.comingSoonChip, { backgroundColor: `${appColors.textTertiary}15` }]}
+                  >
+                    Coming Soon
+                  </Chip>
+                </View>
               )}
             />
           )}
@@ -744,6 +777,20 @@ export default function SettingsScreen() {
               setFeedbackModalVisible(true);
             }}
           />
+          <List.Item
+            title="Rate DayWise ⭐"
+            description="Enjoying the app? Leave us a review"
+            left={(props) => <List.Icon {...props} icon="star-outline" />}
+            right={(props) => <List.Icon {...props} icon="chevron-right" />}
+            onPress={async () => {
+              const available = await StoreReview.isAvailableAsync();
+              if (available) {
+                await StoreReview.requestReview();
+              } else {
+                Linking.openURL("https://play.google.com/store/apps/details?id=com.adam.daywise");
+              }
+            }}
+          />
         </List.Section>
 
         <Divider />
@@ -759,13 +806,13 @@ export default function SettingsScreen() {
             title="Privacy Policy"
             left={(props) => <List.Icon {...props} icon="shield-account" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
-            onPress={() => Alert.alert("Coming Soon", "Privacy Policy will be available when we launch.")}
+            onPress={() => Linking.openURL("https://daywiseapp.com/privacy")}
           />
           <List.Item
             title="Terms of Service"
             left={(props) => <List.Icon {...props} icon="file-document" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
-            onPress={() => Alert.alert("Coming Soon", "Terms of Service will be available when we launch.")}
+            onPress={() => Linking.openURL("https://daywiseapp.com/terms")}
           />
         </List.Section>
 
@@ -1159,10 +1206,10 @@ export default function SettingsScreen() {
         visible={tourStep === "tour_settings_intro"}
         icon="tune-variant"
         iconColor={appColors.primary}
-        title="You're all set!"
-        body="Explore your preferences here anytime. The AI will keep learning from your habits."
+        title="Last stop — Settings"
+        body="Set your work hours, notification times, and personality here. The AI keeps learning from your habits as you go."
         ctaLabel="Finish Tour"
-        onCta={() => advanceTour(null)}
+        onCta={() => advanceTour("tour_complete")}
         onSkip={skipTour}
         showSkip
       />
@@ -1174,26 +1221,52 @@ export default function SettingsScreen() {
         animationType="fade"
         statusBarTranslucent
       >
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 24 }}>
-          <View style={[{ borderRadius: 24, padding: 28, alignItems: "center", width: "100%", maxWidth: 360, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 16, elevation: 8 }, { backgroundColor: appColors.surface }]}>
-            <View style={[{ width: 88, height: 88, borderRadius: 44, alignItems: "center", justifyContent: "center", marginBottom: 20 }, { backgroundColor: `${appColors.success}20` }]}>
-              <MaterialCommunityIcons name="check-decagram-outline" size={52} color={appColors.success} />
+        <View style={tourCompleteStyles.overlay}>
+          <TourCompleteConfetti />
+          <View style={[tourCompleteStyles.card, { backgroundColor: appColors.surface }]}>
+
+            {/* Top accent bar */}
+            <View style={[tourCompleteStyles.accentBar, { backgroundColor: appColors.primary }]} />
+
+            <View style={tourCompleteStyles.body}>
+              {/* Emoji in a tinted circle */}
+              <View style={[tourCompleteStyles.emojiCircle, { backgroundColor: `${appColors.primary}15` }]}>
+                <Text style={tourCompleteStyles.emoji}>🎉</Text>
+              </View>
+
+              <Text style={[tourCompleteStyles.headline, { color: appColors.textPrimary }]}>
+                You're all set!
+              </Text>
+              <Text style={[tourCompleteStyles.sub, { color: appColors.textSecondary }]}>
+                You've seen everything DayWise can do. Now it's your turn.
+              </Text>
+
+              {/* Tips */}
+              <View style={[tourCompleteStyles.tipsCard, { backgroundColor: appColors.background, borderColor: appColors.border }]}>
+                {[
+                  { icon: "calendar-refresh", text: "Overdue? Tap Reschedule All to sort them fast." },
+                  { icon: "clock-alert-outline", text: "Missed a slot? Auto-reschedule handles it." },
+                  { icon: "gesture-tap-hold", text: "Long press tasks to bulk complete or delete." },
+                  { icon: "plus-circle-outline", text: "The + button is your quick-add shortcut." },
+                ].map((tip, i) => (
+                  <View key={i} style={tourCompleteStyles.tipRow}>
+                    <MaterialCommunityIcons name={tip.icon as any} size={16} color={appColors.primary} />
+                    <Text style={[tourCompleteStyles.tipText, { color: appColors.textSecondary }]}>{tip.text}</Text>
+                  </View>
+                ))}
+              </View>
+
+              <Pressable
+                style={[tourCompleteStyles.ctaButton, { backgroundColor: appColors.primary }]}
+                onPress={async () => {
+                  await advanceTour(null);
+                  router.push("/(tabs)/home");
+                }}
+              >
+                <Text style={tourCompleteStyles.ctaLabel}>Let's go!</Text>
+                <MaterialCommunityIcons name="rocket-launch-outline" size={18} color="#FFFFFF" style={{ marginLeft: 6 }} />
+              </Pressable>
             </View>
-            <Text style={[{ fontSize: 24, fontWeight: "800", textAlign: "center", marginBottom: 8 }, { color: appColors.textPrimary }]}>
-              You're all set!
-            </Text>
-            <Text style={[{ fontSize: 15, textAlign: "center", lineHeight: 22, marginBottom: 28 }, { color: appColors.textSecondary }]}>
-              You know how to create AI tasks, handle overdue items, and read your full schedule.
-            </Text>
-            <Pressable
-              style={[{ borderRadius: 14, paddingVertical: 14, paddingHorizontal: 32, alignSelf: "stretch", alignItems: "center" }, { backgroundColor: appColors.success }]}
-              onPress={async () => {
-                await skipTour();
-                router.push("/(tabs)/home");
-              }}
-            >
-              <Text style={{ color: "#FFFFFF", fontWeight: "700", fontSize: 16 }}>Start using DayWise</Text>
-            </Pressable>
           </View>
         </View>
       </RNModal>
@@ -1318,6 +1391,7 @@ const styles = StyleSheet.create({
   calendarRight: {
     flexDirection: "row",
     alignItems: "center",
+    alignSelf: "center",
     marginRight: 8,
   },
   connectedChip: {
@@ -1374,5 +1448,90 @@ const styles = StyleSheet.create({
   reminderOptionTextSelected: {
     color: COLORS.primary,
     fontWeight: "600",
+  },
+});
+
+const tourCompleteStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+  },
+  card: {
+    borderRadius: 24,
+    width: '100%',
+    maxWidth: 360,
+    overflow: 'hidden',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  accentBar: {
+    height: 4,
+    alignSelf: 'stretch',
+  },
+  body: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingTop: 24,
+    paddingBottom: 28,
+  },
+  emojiCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  emoji: {
+    fontSize: 36,
+  },
+  headline: {
+    fontSize: 24,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 8,
+    letterSpacing: -0.3,
+  },
+  sub: {
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 21,
+    marginBottom: 20,
+  },
+  tipsCard: {
+    alignSelf: 'stretch',
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 14,
+    gap: 12,
+    marginBottom: 24,
+  },
+  tipRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  tipText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  ctaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'stretch',
+    borderRadius: 14,
+    paddingVertical: 14,
+  },
+  ctaLabel: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
   },
 });

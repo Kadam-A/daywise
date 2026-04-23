@@ -19,13 +19,13 @@ export default function Index() {
   useEffect(() => {
     checkAuthStatus();
 
-    // Listen for auth state changes
+    // Only listen for sign out — SIGNED_IN is handled by checkAuthStatus on mount.
+    // Handling SIGNED_IN here causes repeated redirects when index is in the
+    // background stack and auth/callback fires a session change.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
+      (event, session) => {
         if (event === "SIGNED_OUT" || !session) {
           setAuthState("unauthenticated");
-        } else if (event === "SIGNED_IN") {
-          await checkOnboardingStatus();
         }
       }
     );

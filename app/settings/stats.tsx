@@ -235,13 +235,13 @@ export default function StatsScreen() {
               )}
 
               {/* ===== INSIGHTS (Pro) ===== */}
-              {insights.length > 0 && (
-                <View style={styles.section}>
-                  <Text variant="titleMedium" style={[styles.sectionTitle, { color: appColors.textPrimary }]}>
-                    Insights
-                  </Text>
-                  <Surface style={[styles.insightsCard, { backgroundColor: appColors.surface }]} elevation={1}>
-                    {insights.map((insight, index) => (
+              <View style={styles.section}>
+                <Text variant="titleMedium" style={[styles.sectionTitle, { color: appColors.textPrimary }]}>
+                  Insights
+                </Text>
+                <Surface style={[styles.insightsCard, { backgroundColor: appColors.surface }]} elevation={1}>
+                  {insights.length > 0 ? (
+                    insights.map((insight, index) => (
                       <View key={index} style={styles.insightRow}>
                         <MaterialCommunityIcons
                           name="lightbulb-outline"
@@ -250,10 +250,21 @@ export default function StatsScreen() {
                         />
                         <Text style={[styles.insightText, { color: appColors.textSecondary }]}>{insight}</Text>
                       </View>
-                    ))}
-                  </Surface>
-                </View>
-              )}
+                    ))
+                  ) : (
+                    <View style={styles.insightRow}>
+                      <MaterialCommunityIcons
+                        name="lightbulb-outline"
+                        size={18}
+                        color={appColors.textTertiary}
+                      />
+                      <Text style={[styles.insightText, { color: appColors.textTertiary }]}>
+                        Complete more tasks to unlock personalized insights
+                      </Text>
+                    </View>
+                  )}
+                </Surface>
+              </View>
 
               {/* ===== SCHEDULING BREAKDOWN (Pro) ===== */}
               {schedulingRatio && schedulingRatio.totalScheduled > 0 && (
@@ -277,7 +288,7 @@ export default function StatsScreen() {
               <View style={styles.section}>
                 <Pressable
                   style={styles.upgradeCard}
-                  onPress={() => router.push('/paywall')}
+                  onPress={() => router.push({ pathname: '/paywall', params: { source: 'stats' } })}
                 >
                   <LinearGradient
                     colors={[appColors.gradientStart, appColors.gradientEnd]}
@@ -375,7 +386,7 @@ function SummaryCard({
 function WeekProgressCard({ stats }: { stats: UserStats | null }) {
   const appColors = useAppColors();
   const completed = stats?.tasks_completed_week || 0;
-  const total = stats?.tasks_total_week || 0;
+  const total = Math.max(stats?.tasks_total_week || 0, completed); // never show completed > total
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   return (

@@ -23,6 +23,7 @@ import {
 import { Text } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAppColors } from '@/contexts/ThemeContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // ─── Mock task card ────────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ interface TourStatesModalProps {
 
 export default function TourStatesModal({ visible, onClose }: TourStatesModalProps) {
   const appColors = useAppColors();
+  const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState(0);
   const [isAnimating, setIsAnimating] = useState(false);
 
@@ -223,7 +225,7 @@ export default function TourStatesModal({ visible, onClose }: TourStatesModalPro
       icon: 'alert-circle-outline',
       iconColor: appColors.error,
       title: 'Now it\'s overdue',
-      body: "The due date has passed. Use Bulk Reschedule — one tap sets new times for all overdue tasks at once. You'll find it on the home screen when tasks are overdue.",
+      body: "The due date has passed. Tap the reschedule icon next to any task to move it one at a time, or use Bulk Reschedule on the home screen to set new times for all overdue tasks at once.",
       ctaLabel: 'Got it',
     },
   ];
@@ -253,7 +255,7 @@ export default function TourStatesModal({ visible, onClose }: TourStatesModalPro
       statusBarTranslucent
     >
       <View style={[styles.overlay, { backgroundColor: 'rgba(0,0,0,0.5)' }]}>
-        <View style={[styles.sheet, { backgroundColor: appColors.surface }]}>
+        <View style={[styles.sheet, { backgroundColor: appColors.surface, paddingBottom: insets.bottom + 24 }]}>
           {/* Header */}
           <Text style={[styles.sheetTitle, { color: appColors.textPrimary }]}>
             Understanding task states
@@ -337,12 +339,11 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     justifyContent: 'flex-end',
+    paddingBottom: 80,
   },
   sheet: {
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderRadius: 24,
     paddingTop: 24,
-    paddingBottom: 40,
     paddingHorizontal: 20,
     shadowOffset: { width: 0, height: -4 },
     shadowOpacity: 0.12,

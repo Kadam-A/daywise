@@ -26,6 +26,7 @@ export default function TabsLayout() {
           paddingBottom: Math.max(insets.bottom, 8),
           height: 64 + insets.bottom,
         },
+        tabBarHideOnKeyboard: true,
         tabBarLabelStyle: {
           fontSize: 12,
           fontWeight: "600",

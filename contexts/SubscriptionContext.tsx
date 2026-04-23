@@ -28,6 +28,7 @@ interface SubscriptionContextValue {
   canUseAI: boolean;
   isTrialing: boolean;
   trialDaysRemaining: number | null;
+  hasEverTrialed: boolean;
 
   // AI usage for freemium limit
   aiUsage: AIUsage | null;
@@ -42,9 +43,9 @@ interface SubscriptionContextValue {
 
 const DEFAULT_FREE_FEATURES: PlanFeatures = {
   ai_scheduling: false,
-  recurring_tasks: 3,
-  task_history_days: 30,
-  auto_reschedule_per_week: 1,
+  recurring_tasks: -1,      // unlimited on free
+  task_history_days: -1,    // unlimited on free
+  auto_reschedule_per_week: 0, // Pro only
 };
 
 const DEFAULT_PRO_FEATURES: PlanFeatures = {
@@ -69,7 +70,7 @@ const SubscriptionContext = createContext<SubscriptionContextValue>({
 });
 
 export function SubscriptionProvider({ children }: { children: ReactNode }) {
-  const { isAdmin } = useAuth();
+  const { isAdmin, user } = useAuth();
   const [subscription, setSubscription] = useState<UserSubscription | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -95,11 +96,13 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
       if (fetchError) {
         // If no subscription found, user is on free plan (might be new user)
         if (fetchError.code === 'PGRST116') {
+          console.log('[SubscriptionContext] No subscription row found — free plan');
           setSubscription(null);
         } else {
           throw fetchError;
         }
       } else {
+        console.log('[SubscriptionContext] Subscription loaded:', JSON.stringify(data));
         setSubscription(data as UserSubscription);
       }
     } catch (err) {
@@ -185,35 +188,30 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
     return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
   }, [isTrialing, subscription?.trial_ends_at]);
 
+  const hasEverTrialed = React.useMemo(() => {
+    return !!subscription?.trial_ends_at;
+  }, [subscription]);
+
   const features = React.useMemo(() => {
     return isPro ? DEFAULT_PRO_FEATURES : DEFAULT_FREE_FEATURES;
   }, [isPro]);
 
   const canUseAI = aiUsage !== null && (aiUsage.isUnlimited || aiUsage.used < aiUsage.limit);
 
-  // Fetch on mount and auth changes
+  // Fetch subscription and AI usage whenever the authenticated user changes.
+  // Runs in a React effect — completely outside the Supabase auth mutex.
+  // Do NOT call supabase.auth.getUser() / supabase.rpc() inside onAuthStateChange;
+  // those calls try to re-acquire the auth mutex while setSession() still holds it → deadlock.
   useEffect(() => {
-    fetchSubscription();
-    fetchAIUsage();
-
-    // Listen for auth changes
-    const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-          fetchSubscription();
-          fetchAIUsage();
-        } else if (event === 'SIGNED_OUT') {
-          setSubscription(null);
-          setAIUsage(null);
-          setIsLoading(false);
-        }
-      }
-    );
-
-    return () => {
-      authSubscription.unsubscribe();
-    };
-  }, [fetchSubscription, fetchAIUsage]);
+    if (user?.id) {
+      fetchSubscription();
+      fetchAIUsage();
+    } else {
+      setSubscription(null);
+      setAIUsage(null);
+      setIsLoading(false);
+    }
+  }, [user?.id, fetchSubscription, fetchAIUsage]);
 
   // Listen for realtime subscription changes
   useEffect(() => {
@@ -248,6 +246,7 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
         canUseAI,
         isTrialing,
         trialDaysRemaining,
+        hasEverTrialed,
         aiUsage,
         features,
         refresh: fetchSubscription,
