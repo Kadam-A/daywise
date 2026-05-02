@@ -17,6 +17,7 @@ import {
   Avatar,
   ActivityIndicator,
   Chip,
+  TouchableRipple,
 } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -61,6 +62,23 @@ const COLORS = {
 };
 
 const CONFETTI_COLORS = ['#4A90E2', '#7C6FBF', '#5FBF73', '#F5A962', '#E25555', '#F472B6'];
+
+function SettingsItem({ onPress, style, ...props }: React.ComponentProps<typeof List.Item>) {
+  const [pressed, setPressed] = useState(false);
+  if (!onPress) {
+    return <List.Item {...props} style={[{ backgroundColor: 'transparent' }, style]} />;
+  }
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={() => setPressed(true)}
+      onPressOut={() => setPressed(false)}
+      style={{ backgroundColor: pressed ? `${COLORS.primary}18` : 'transparent' }}
+    >
+      <List.Item {...props} style={[{ backgroundColor: 'transparent' }, style]} />
+    </Pressable>
+  );
+}
 
 function TourCompleteConfetti() {
   const particles = useMemo(() =>
@@ -109,7 +127,7 @@ function TourCompleteConfetti() {
 export default function SettingsScreen() {
   const { tourStep, advanceTour, skipTour: _skipTour } = useGuidedTour();
   const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
-  const { isPro } = useSubscription();
+  const { isPro, isTrialing, trialDaysRemaining } = useSubscription();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [reminderTime, setReminderTime] = useState(15);
   const [displayName, setDisplayName] = useState<string>("");
@@ -305,7 +323,6 @@ export default function SettingsScreen() {
     }
   };
 
-  const [deleteAccountLoading, setDeleteAccountLoading] = useState(false);
 
   const handleLogout = async () => {
     try {
@@ -317,69 +334,7 @@ export default function SettingsScreen() {
   };
 
   const handleDeleteAccount = () => {
-    Alert.alert(
-      "Delete Account",
-      "This will permanently delete your account and all your data. This action cannot be undone.\n\nAre you sure you want to continue?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: confirmDeleteAccount,
-        },
-      ]
-    );
-  };
-
-  const confirmDeleteAccount = () => {
-    // Double confirmation for safety
-    Alert.alert(
-      "Final Confirmation",
-      "This is your last chance. All tasks, schedules, and data will be gone forever.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Yes, Delete Everything",
-          style: "destructive",
-          onPress: executeDeleteAccount,
-        },
-      ]
-    );
-  };
-
-  const executeDeleteAccount = async () => {
-    try {
-      setDeleteAccountLoading(true);
-
-      const { data, error } = await supabase.functions.invoke("delete-account");
-
-      if (error) {
-        throw error;
-      }
-
-      if (!data.success) {
-        throw new Error(data.error || "Failed to delete account");
-      }
-
-      Alert.alert(
-        "Account Deleted",
-        "Your account and all data have been permanently deleted.",
-        [
-          {
-            text: "OK",
-            onPress: () => router.replace("/(auth)/login"),
-          },
-        ]
-      );
-    } catch (error) {
-      console.error("[Settings] Delete account error:", error);
-      Alert.alert(
-        "Error",
-        "Failed to delete account. Please try again or contact support."
-      );
-    } finally {
-      setDeleteAccountLoading(false);
-    }
+    router.push("/settings/account");
   };
 
   const handleConnectCalendar = async () => {
@@ -394,15 +349,25 @@ export default function SettingsScreen() {
   const handleDisconnectCalendar = () => {
     Alert.alert(
       "Disconnect Google Calendar",
-      "This will remove calendar sync. Your tasks will remain, but calendar events won't be synced.",
+      "What would you like to do with your synced Google Calendar events in DayWise?",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Disconnect",
+          text: "Keep Events",
+          onPress: async () => {
+            try {
+              await disconnectCalendar(false);
+            } catch (error) {
+              console.error("[Settings] Calendar disconnect error:", error);
+            }
+          },
+        },
+        {
+          text: "Remove Events",
           style: "destructive",
           onPress: async () => {
             try {
-              await disconnectCalendar();
+              await disconnectCalendar(true);
             } catch (error) {
               console.error("[Settings] Calendar disconnect error:", error);
             }
@@ -546,21 +511,28 @@ export default function SettingsScreen() {
 
         <List.Section>
           <List.Subheader>Account</List.Subheader>
-          <List.Item
+          <SettingsItem
+            title="Account & Subscription"
+            description={isTrialing ? `Pro Trial · ${trialDaysRemaining}d left` : isPro ? "Pro" : "Free plan"}
+            left={(props) => <List.Icon {...props} icon="account-circle-outline" />}
+            right={(props) => <List.Icon {...props} icon="chevron-right" />}
+            onPress={() => router.push("/settings/account")}
+          />
+          <SettingsItem
             title="Display Name"
             description={displayName || "Not set"}
             left={(props) => <List.Icon {...props} icon="account-edit" />}
             right={(props) => <List.Icon {...props} icon="pencil" />}
             onPress={handleEditName}
           />
-          <List.Item
+          <SettingsItem
             title="Your Profile"
             description="View and adjust your personality settings"
             left={(props) => <List.Icon {...props} icon="head-lightbulb" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => router.push("/settings/personality")}
           />
-          <List.Item
+          <SettingsItem
             title="Your Stats"
             description="View your productivity analytics"
             left={(props) => <List.Icon {...props} icon="chart-box-outline" />}
@@ -568,7 +540,7 @@ export default function SettingsScreen() {
             onPress={() => router.push("/settings/stats")}
           />
           {isAdmin && (
-            <List.Item
+            <SettingsItem
               title="Admin Dashboard"
               description={role === "super_admin" ? "Super Admin access" : "Admin access"}
               left={(props) => <List.Icon {...props} icon="shield-crown" color={appColors.secondary} />}
@@ -583,7 +555,7 @@ export default function SettingsScreen() {
 
         <List.Section>
           <List.Subheader>Preferences</List.Subheader>
-          <List.Item
+          <SettingsItem
             title="Notifications"
             description="Push notifications for task reminders"
             left={(props) => <List.Icon {...props} icon="bell" />}
@@ -595,7 +567,7 @@ export default function SettingsScreen() {
             )}
           />
           {notificationsEnabled && (
-            <List.Item
+            <SettingsItem
               title="Reminder Time"
               description={`${reminderTime} minutes before task`}
               left={(props) => <List.Icon {...props} icon="alarm" />}
@@ -603,14 +575,14 @@ export default function SettingsScreen() {
               onPress={() => setReminderModalVisible(true)}
             />
           )}
-          <List.Item
+          <SettingsItem
             title="Work Hours"
             description={`${formatHourDisplay(workStartHour)} - ${formatHourDisplay(workEndHour)}`}
             left={(props) => <List.Icon {...props} icon="clock" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => setWorkHoursModalVisible(true)}
           />
-          <List.Item
+          <SettingsItem
             title="Auto-Reschedule"
             description={!isPro
               ? "Pro feature • Upgrade to unlock"
@@ -623,7 +595,7 @@ export default function SettingsScreen() {
             )}
             onPress={() => isPro ? setAutoRescheduleModalVisible(true) : router.push({ pathname: "/paywall", params: { source: "auto_reschedule" } })}
           />
-          <List.Item
+          <SettingsItem
             title="Appearance"
             description={themeMode === 'system' ? 'System default' : themeMode === 'dark' ? 'Dark mode' : 'Light mode'}
             left={(props) => <List.Icon {...props} icon={themeMode === 'dark' ? 'weather-night' : themeMode === 'system' ? 'theme-light-dark' : 'white-balance-sunny'} />}
@@ -643,7 +615,7 @@ export default function SettingsScreen() {
               </View>
             )}
           />
-          <List.Item
+          <SettingsItem
             title="Default Task Duration"
             description={defaultDuration < 60 ? `${defaultDuration} minutes` : defaultDuration === 60 ? "1 hour" : `${defaultDuration / 60} hours`}
             left={(props) => <List.Icon {...props} icon="timer" />}
@@ -658,7 +630,7 @@ export default function SettingsScreen() {
           <List.Subheader>Integrations</List.Subheader>
           {isAdmin ? (
             <>
-              <List.Item
+              <SettingsItem
                 title="Google Calendar"
                 description={
                   isCalendarLoading
@@ -697,7 +669,7 @@ export default function SettingsScreen() {
               />
               {isCalendarConnected && (
                 <>
-                  <List.Item
+                  <SettingsItem
                     title="Sync Now"
                     description="Refresh calendar events"
                     left={(props) => <List.Icon {...props} icon="sync" />}
@@ -709,7 +681,7 @@ export default function SettingsScreen() {
                     onPress={handleSyncCalendar}
                     disabled={isCalendarLoading}
                   />
-                  <List.Item
+                  <SettingsItem
                     title="Disconnect"
                     description="Remove Google Calendar sync"
                     left={(props) => <List.Icon {...props} icon="link-off" />}
@@ -720,7 +692,7 @@ export default function SettingsScreen() {
               )}
             </>
           ) : (
-            <List.Item
+            <SettingsItem
               title="Google Calendar"
               description="Sync your calendar events"
               left={(props) => <List.Icon {...props} icon="google" />}
@@ -743,21 +715,21 @@ export default function SettingsScreen() {
 
         <List.Section>
           <List.Subheader>Help & Support</List.Subheader>
-          <List.Item
+          <SettingsItem
             title="Help & FAQ"
             description="How scheduling works, task states, and more"
             left={(props) => <List.Icon {...props} icon="help-circle-outline" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => setHelpFaqVisible(true)}
           />
-          <List.Item
+          <SettingsItem
             title="Send Feedback"
             description="Share your thoughts"
             left={(props) => <List.Icon {...props} icon="comment-text-outline" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => setFeedbackModalVisible(true)}
           />
-          <List.Item
+          <SettingsItem
             title="Request a Feature"
             description="Tell us what's missing"
             left={(props) => <List.Icon {...props} icon="lightbulb-outline" />}
@@ -767,7 +739,7 @@ export default function SettingsScreen() {
               setFeedbackModalVisible(true);
             }}
           />
-          <List.Item
+          <SettingsItem
             title="Report a Bug"
             description="Something not working?"
             left={(props) => <List.Icon {...props} icon="bug-outline" />}
@@ -777,17 +749,30 @@ export default function SettingsScreen() {
               setFeedbackModalVisible(true);
             }}
           />
-          <List.Item
+          <SettingsItem
             title="Rate DayWise ⭐"
             description="Enjoying the app? Leave us a review"
             left={(props) => <List.Icon {...props} icon="star-outline" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={async () => {
-              const available = await StoreReview.isAvailableAsync();
-              if (available) {
-                await StoreReview.requestReview();
-              } else {
-                Linking.openURL("https://play.google.com/store/apps/details?id=com.adam.daywise");
+              try {
+                const available = await StoreReview.isAvailableAsync();
+                if (available) {
+                  const start = Date.now();
+                  await StoreReview.requestReview();
+                  // If it resolved in under 500ms Google silently skipped the dialog
+                  if (Date.now() - start > 500) return;
+                }
+                // Fallback: open Play Store directly
+                const marketUrl = "market://details?id=com.adam.daywise";
+                const canOpen = await Linking.canOpenURL(marketUrl);
+                await Linking.openURL(
+                  canOpen
+                    ? marketUrl
+                    : "https://play.google.com/store/apps/details?id=com.adam.daywise"
+                );
+              } catch (e) {
+                Alert.alert("Couldn't open Play Store", "Search for DayWise on the Play Store to leave a review.");
               }
             }}
           />
@@ -797,18 +782,18 @@ export default function SettingsScreen() {
 
         <List.Section>
           <List.Subheader>About</List.Subheader>
-          <List.Item
+          <SettingsItem
             title="Version"
             description="1.0.0 (MVP)"
             left={(props) => <List.Icon {...props} icon="information" />}
           />
-          <List.Item
+          <SettingsItem
             title="Privacy Policy"
             left={(props) => <List.Icon {...props} icon="shield-account" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => Linking.openURL("https://daywiseapp.com/privacy")}
           />
-          <List.Item
+          <SettingsItem
             title="Terms of Service"
             left={(props) => <List.Icon {...props} icon="file-document" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
@@ -820,17 +805,12 @@ export default function SettingsScreen() {
 
         <List.Section>
           <List.Subheader style={[styles.dangerHeader, { color: appColors.error }]}>Danger Zone</List.Subheader>
-          <List.Item
+          <SettingsItem
             title="Delete Account"
             description="Permanently delete your account and all data"
             left={(props) => <List.Icon {...props} icon="delete-forever" color={appColors.error} />}
-            right={() =>
-              deleteAccountLoading ? (
-                <ActivityIndicator size="small" color={appColors.error} style={{ marginRight: 16 }} />
-              ) : null
-            }
+            right={(props) => <List.Icon {...props} icon="chevron-right" color={appColors.error} />}
             onPress={handleDeleteAccount}
-            disabled={deleteAccountLoading}
             titleStyle={[styles.deleteAccountText, { color: appColors.error }]}
             descriptionStyle={[styles.deleteAccountDescription, { color: appColors.error }]}
           />

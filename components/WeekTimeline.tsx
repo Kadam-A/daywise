@@ -46,12 +46,15 @@ import * as Haptics from "expo-haptics";
 
 export type DayCount = 3 | 7;
 
+const GOOGLE_BLUE = "#4285F4";
+
 interface WeekTimelineProps {
   weekStart: Date;
   tasks: Task[];
   calendarEvents: CalendarEvent[];
   onTaskPress: (task: Task) => void;
   onTaskReschedule?: (task: Task, newStart: string, newEnd: string) => void;
+  onEventPress?: (event: CalendarEvent) => void;
   dayCount: DayCount;
   onDayCountChange: (count: DayCount) => void;
   startHour?: number;
@@ -424,6 +427,7 @@ export default function WeekTimeline({
   calendarEvents,
   onTaskPress,
   onTaskReschedule,
+  onEventPress,
   dayCount,
   onDayCountChange,
   startHour = 0,
@@ -705,34 +709,37 @@ export default function WeekTimeline({
                     />
                   )}
 
-                  {/* Calendar events */}
+                  {/* Calendar events (Google blue accent) */}
                   {dayEvents.map((event) => {
                     const pos = getItemPosition(
                       event.start_time,
                       event.end_time
                     );
                     return (
-                      <View
+                      <Pressable
                         key={event.id}
+                        onPress={() => onEventPress?.(event)}
                         style={[
                           styles.eventBlock,
                           {
                             top: pos.top,
                             height: pos.height,
-                            backgroundColor: `${COLORS.textTertiary}20`,
+                            backgroundColor: GOOGLE_BLUE + "18",
+                            borderLeftWidth: 2,
+                            borderLeftColor: GOOGLE_BLUE,
                           },
                         ]}
                       >
                         <Text
                           style={[
                             styles.eventTitle,
-                            { color: COLORS.textSecondary, fontSize: dayCount === 3 ? 12 : 10 },
+                            { color: GOOGLE_BLUE, fontSize: dayCount === 3 ? 12 : 10 },
                           ]}
                           numberOfLines={dayCount === 3 ? 2 : 1}
                         >
                           {event.title}
                         </Text>
-                      </View>
+                      </Pressable>
                     );
                   })}
 

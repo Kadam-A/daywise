@@ -27,6 +27,7 @@ import {
 } from "@/lib/google-calendar";
 import { isRecurringInstance } from "@/lib/recurrence";
 import { trackTaskCompleted, trackTaskDeleted } from "@/lib/analytics";
+import { incrementCompletedTaskCount } from "@/lib/review";
 import ErrorState from "@/components/ErrorState";
 import { useNetwork } from "@/contexts/NetworkContext";
 import { queueOperation } from "@/lib/offline";
@@ -40,6 +41,7 @@ import TourTooltip from "@/components/TourTooltip";
 import TourPulseDot from "@/components/TourPulseDot";
 import TourRewardModal from "@/components/TourRewardModal";
 import TourStatesModal from "@/components/TourStatesModal";
+import GoogleEventSheet from "@/components/GoogleEventSheet";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -500,28 +502,29 @@ function AgendaTaskItem({ task, onPress, onComplete, onLongPress, isSelecting, i
   );
 }
 
+const GOOGLE_BLUE = "#4285F4";
+
 // Compact Agenda Event Item (calendar events)
-function AgendaEventItem({ event }: { event: CalendarEvent }) {
-  const { colors } = useTheme();
+function AgendaEventItem({ event, onPress }: { event: CalendarEvent; onPress: () => void }) {
   const appColors = useAppColors();
   const startTime = format(parseISO(event.start_time), "h:mm a");
 
   return (
-    <View style={styles.agendaItem}>
+    <Pressable style={styles.agendaItem} onPress={onPress}>
       <View style={styles.agendaTimeCol}>
         <Text style={[styles.agendaTime, { color: appColors.textSecondary }]}>{startTime}</Text>
       </View>
-      <View style={[styles.agendaDot, { backgroundColor: appColors.textTertiary }]} />
+      <View style={[styles.agendaDot, { backgroundColor: GOOGLE_BLUE }]} />
       <View style={styles.agendaContent}>
         <Text style={[styles.agendaTitle, styles.agendaEventTitle, { color: appColors.textSecondary }]} numberOfLines={1}>
           {event.title}
         </Text>
-        <View style={styles.agendaEventBadge}>
-          <MaterialCommunityIcons name="calendar" size={10} color={appColors.textTertiary} />
-          <Text style={[styles.agendaEventLabel, { color: appColors.textTertiary }]}>Event</Text>
+        <View style={[styles.agendaEventBadge, { backgroundColor: GOOGLE_BLUE + "18" }]}>
+          <MaterialCommunityIcons name="google" size={10} color={GOOGLE_BLUE} />
+          <Text style={[styles.agendaEventLabel, { color: GOOGLE_BLUE }]}>Google</Text>
         </View>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -560,6 +563,7 @@ export default function HomeScreen() {
   const [displayName, setDisplayName] = useState<string>("");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [selectedCalendarEvent, setSelectedCalendarEvent] = useState<CalendarEvent | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [navigatingToPaywall, setNavigatingToPaywall] = useState(false);
@@ -1080,8 +1084,7 @@ export default function HomeScreen() {
 
       if (updateError) throw updateError;
 
-      // Track each completed task
-      ids.forEach(() => trackTaskCompleted());
+      ids.forEach(() => { trackTaskCompleted(); incrementCompletedTaskCount(); });
     } catch (err) {
       console.error("[Home] Bulk complete error:", err);
       loadData(); // Revert by reloading
@@ -1324,6 +1327,7 @@ export default function HomeScreen() {
       if (updateError) throw updateError;
 
       trackTaskCompleted(); // fire-and-forget
+      incrementCompletedTaskCount(); // fire-and-forget
     } catch (err) {
       console.error("[Home] Error marking task done:", err);
       // Revert optimistic update on failure
@@ -1591,7 +1595,7 @@ export default function HomeScreen() {
                       isSelected={selectedIds.has(entry.item.id)}
                     />
                   ) : (
-                    <AgendaEventItem key={entry.item.id} event={entry.item as CalendarEvent} />
+                    <AgendaEventItem key={entry.item.id} event={entry.item as CalendarEvent} onPress={() => setSelectedCalendarEvent(entry.item as CalendarEvent)} />
                   )
                 ))
               }
@@ -2258,6 +2262,12 @@ export default function HomeScreen() {
         onCta={() => advanceTour("tour_add_ai")}
         onSkip={skipTour}
         showSkip
+      />
+
+      <GoogleEventSheet
+        event={selectedCalendarEvent}
+        onDismiss={() => setSelectedCalendarEvent(null)}
+        onUpdated={loadData}
       />
     </SafeAreaView>
   );

@@ -33,6 +33,7 @@ import { Task, CalendarEvent } from "@/lib/types";
 import { getLocalCalendarEvents } from "@/lib/google-calendar";
 import CalendarMonthView from "@/components/CalendarMonthView";
 import CalendarDayList from "@/components/CalendarDayList";
+import GoogleEventSheet from "@/components/GoogleEventSheet";
 import DayTimeline from "@/components/DayTimeline";
 import WeekTimeline, { DayCount } from "@/components/WeekTimeline";
 import ErrorState from "@/components/ErrorState";
@@ -76,6 +77,7 @@ export default function CalendarScreen() {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [selectedCalendarEvent, setSelectedCalendarEvent] = useState<CalendarEvent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
@@ -427,6 +429,7 @@ export default function CalendarScreen() {
             date={selectedDate}
             onTaskPress={handleTaskPress}
             onTaskReschedule={handleTaskReschedule}
+            onEventPress={setSelectedCalendarEvent}
             autoScrollToNow={true}
           />
         </View>
@@ -442,6 +445,7 @@ export default function CalendarScreen() {
             calendarEvents={calendarEvents}
             onTaskPress={handleTaskPress}
             onTaskReschedule={handleTaskReschedule}
+            onEventPress={setSelectedCalendarEvent}
             dayCount={weekDayCount}
             onDayCountChange={handleDayCountChange}
           />
@@ -465,6 +469,7 @@ export default function CalendarScreen() {
               tasks={tasks}
               calendarEvents={calendarEvents}
               onTaskPress={handleTaskPress}
+              onEventPress={setSelectedCalendarEvent}
             />
           </View>
         </ScrollView>
@@ -500,6 +505,12 @@ export default function CalendarScreen() {
         onDismiss={() => setShowQuickAdd(false)}
         onCreated={() => { setShowQuickAdd(false); loadData(); }}
         preselectedDate={viewMode === "month" ? selectedDate : undefined}
+      />
+
+      <GoogleEventSheet
+        event={selectedCalendarEvent}
+        onDismiss={() => setSelectedCalendarEvent(null)}
+        onUpdated={loadData}
       />
 
       {/* Tour Tooltips */}

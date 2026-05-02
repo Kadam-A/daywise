@@ -7,7 +7,7 @@
  * Architecture:
  * Mobile App → This Edge Function → OpenAI GPT-4o-mini
  *
- * Rate limit: 100 requests/hour/user
+ * Rate limit: 25 requests/hour/user (Pro + Trial)
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -977,7 +977,8 @@ function describePersonality(p: PersonalityData): string {
 }
 
 /**
- * Check rate limit (100 requests per hour per user)
+ * Check rate limit (25 requests per hour per user).
+ * Even heavy Pro/Trial users won't hit this in normal use — it's a cost-abuse guard.
  */
 async function checkRateLimit(
   supabase: ReturnType<typeof createClient>,
@@ -997,7 +998,7 @@ async function checkRateLimit(
     return false;
   }
 
-  return (count || 0) < 100;
+  return (count || 0) < 25;
 }
 
 /**

@@ -30,11 +30,14 @@ const PRIORITY_STYLES = {
   low: { bg: "#F0FDF4", accent: "#5FBF73", pillBg: "#D1FAE5", pillText: "#065F46" },
 };
 
+const GOOGLE_BLUE = "#4285F4";
+
 interface CalendarDayListProps {
   date: Date;
   tasks: Task[];
   calendarEvents: CalendarEvent[];
   onTaskPress: (task: Task) => void;
+  onEventPress?: (event: CalendarEvent) => void;
 }
 
 export default function CalendarDayList({
@@ -42,6 +45,7 @@ export default function CalendarDayList({
   tasks,
   calendarEvents,
   onTaskPress,
+  onEventPress,
 }: CalendarDayListProps) {
   const COLORS = useAppColors();
 
@@ -127,25 +131,30 @@ export default function CalendarDayList({
         <View style={styles.list}>
           {/* Calendar Events */}
           {sortedEvents.map((event) => (
-            <View key={event.id} style={styles.eventItem}>
+            <Pressable key={event.id} style={styles.eventItem} onPress={() => onEventPress?.(event)}>
               <View style={styles.eventTime}>
                 <Text style={[styles.eventTimeText, { color: COLORS.textSecondary }]}>
                   {format(parseISO(event.start_time), "h:mm a")}
                 </Text>
               </View>
               <View style={[styles.eventContent, { backgroundColor: COLORS.background }]}>
-                <View style={[styles.calendarIndicator, { backgroundColor: COLORS.textTertiary }]} />
+                <View style={[styles.calendarIndicator, { backgroundColor: GOOGLE_BLUE }]} />
                 <View style={styles.eventInfo}>
                   <Text style={[styles.calendarEventTitle, { color: COLORS.textSecondary }]} numberOfLines={1}>
                     {event.title}
                   </Text>
-                  <Text style={[styles.calendarEventMeta, { color: COLORS.textTertiary }]}>
-                    {format(parseISO(event.start_time), "h:mm a")} -{" "}
-                    {format(parseISO(event.end_time), "h:mm a")}
-                  </Text>
+                  <View style={styles.calendarEventMetaRow}>
+                    <Text style={[styles.calendarEventMeta, { color: COLORS.textTertiary }]}>
+                      {format(parseISO(event.start_time), "h:mm a")} – {format(parseISO(event.end_time), "h:mm a")}
+                    </Text>
+                    <View style={[styles.googleBadge, { backgroundColor: GOOGLE_BLUE + "18" }]}>
+                      <MaterialCommunityIcons name="google" size={9} color={GOOGLE_BLUE} />
+                      <Text style={[styles.googleBadgeText, { color: GOOGLE_BLUE }]}>Google</Text>
+                    </View>
+                  </View>
                 </View>
               </View>
-            </View>
+            </Pressable>
           ))}
 
           {/* Tasks */}
@@ -248,10 +257,27 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     color: COLORS.textSecondary,
   },
+  calendarEventMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 2,
+  },
   calendarEventMeta: {
     fontSize: 12,
     color: COLORS.textTertiary,
-    marginTop: 2,
+  },
+  googleBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  googleBadgeText: {
+    fontSize: 10,
+    fontWeight: "600",
   },
   // Task cards with soft colored backgrounds
   taskCard: {

@@ -25,34 +25,50 @@ import {
 const STORAGE_KEYS = {
   REVIEW_REQUESTED: 'review_requested',
   TASKS_COMPLETED_COUNT: 'tasks_completed_count',
+  TASKS_CREATED_COUNT: 'tasks_created_count',
   HAPPINESS_CHECK_SHOWN: 'happiness_check_shown',
 };
 
 // Configuration
-const MIN_TASKS_COMPLETED = 5;
-const MIN_DAYS_SINCE_INSTALL = 7;
+const MIN_TASKS_COMPLETED = 10;
+const MIN_TASKS_CREATED = 10;
+const MIN_DAYS_SINCE_INSTALL = 0;
 const TRIAL_DURATION_DAYS = 7;
 
 /**
- * Increment the completed tasks counter
- * Call this every time a task is marked complete
+ * Increment the completed tasks counter and check if review should trigger
  */
 export async function incrementCompletedTaskCount(): Promise<void> {
   try {
     const currentCount = await getCompletedTaskCount();
-    await AsyncStorage.setItem(
-      STORAGE_KEYS.TASKS_COMPLETED_COUNT,
-      String(currentCount + 1)
-    );
-    console.log('[Review] Tasks completed:', currentCount + 1);
+    const newCount = currentCount + 1;
+    await AsyncStorage.setItem(STORAGE_KEYS.TASKS_COMPLETED_COUNT, String(newCount));
+    console.log('[Review] Tasks completed:', newCount);
+    if (newCount === MIN_TASKS_COMPLETED) {
+      await maybeRequestReview();
+    }
   } catch (err) {
-    console.error('[Review] Error incrementing count:', err);
+    console.error('[Review] Error incrementing completed count:', err);
   }
 }
 
 /**
- * Get current completed task count
+ * Increment the created tasks counter and check if review should trigger
  */
+export async function incrementCreatedTaskCount(): Promise<void> {
+  try {
+    const count = await AsyncStorage.getItem(STORAGE_KEYS.TASKS_CREATED_COUNT);
+    const newCount = (count ? parseInt(count, 10) : 0) + 1;
+    await AsyncStorage.setItem(STORAGE_KEYS.TASKS_CREATED_COUNT, String(newCount));
+    console.log('[Review] Tasks created:', newCount);
+    if (newCount === MIN_TASKS_CREATED) {
+      await maybeRequestReview();
+    }
+  } catch (err) {
+    console.error('[Review] Error incrementing created count:', err);
+  }
+}
+
 async function getCompletedTaskCount(): Promise<number> {
   try {
     const count = await AsyncStorage.getItem(STORAGE_KEYS.TASKS_COMPLETED_COUNT);
@@ -126,17 +142,14 @@ export async function maybeRequestReview(): Promise<boolean> {
       return false;
     }
 
-    // Check task count
-    const taskCount = await getCompletedTaskCount();
-    if (taskCount < MIN_TASKS_COMPLETED) {
-      console.log('[Review] Not enough tasks:', taskCount, '/', MIN_TASKS_COMPLETED);
-      return false;
-    }
-
-    // Check days since install
-    const daysSinceInstall = await getDaysSinceInstall();
-    if (daysSinceInstall < MIN_DAYS_SINCE_INSTALL) {
-      console.log('[Review] Too soon:', daysSinceInstall, '/', MIN_DAYS_SINCE_INSTALL, 'days');
+    // Check task milestones — either 10 created OR 10 completed qualifies
+    const completedCount = await getCompletedTaskCount();
+    const createdCount = parseInt(
+      (await AsyncStorage.getItem(STORAGE_KEYS.TASKS_CREATED_COUNT)) || '0', 10
+    );
+    const milestoneReached = completedCount >= MIN_TASKS_COMPLETED || createdCount >= MIN_TASKS_CREATED;
+    if (!milestoneReached) {
+      console.log('[Review] Milestone not reached — completed:', completedCount, 'created:', createdCount);
       return false;
     }
 

@@ -7,21 +7,19 @@
  * SECURITY: See SECURITY.md "CRITICAL #3: OAuth Security (PKCE Required)"
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useFocusEffect } from "expo-router";
 import * as AuthSession from "expo-auth-session";
 import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
-import Constants from "expo-constants";
-import { Platform } from "react-native";
+import { Platform, Linking } from "react-native";
 import { GoogleCalendarTokens, GoogleCalendarEvent, CalendarEvent } from "./types";
 import { supabase } from "./supabase";
 import { trackCalendarSynced, trackCalendarSyncFailed } from "./analytics";
 
-// Check if running in Expo Go
-const isExpoGo = Constants.appOwnership === "expo";
-
-// Complete the auth session when returning to the app
-WebBrowser.maybeCompleteAuthSession();
+// HTTPS redirect target — Supabase function bounces back to daywise:// scheme.
+// Required because Google blocks custom URI schemes for sensitive scopes on Web clients.
+const OAUTH_REDIRECT_URI = "https://rkhjkkneadmfaacqcoth.supabase.co/functions/v1/google-oauth-redirect";
 
 // Google OAuth endpoints
 const discovery: AuthSession.DiscoveryDocument = {
@@ -36,23 +34,13 @@ const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ];
 
-// Get the appropriate client ID for the current platform
+// Always use Web client — Android clients block custom URI schemes with sensitive scopes.
 function getClientId(): string {
-  if (Platform.OS === "android") {
-    return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID || "";
-  } else if (Platform.OS === "ios") {
-    return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS || "";
-  }
-  // Web/Expo Go
   return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_WEB || "";
 }
 
-// Get client secret (only needed for web)
 function getClientSecret(): string | undefined {
-  if (Platform.OS === "web") {
-    return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_SECRET_WEB;
-  }
-  return undefined;
+  return process.env.EXPO_PUBLIC_GOOGLE_CLIENT_SECRET_WEB;
 }
 
 // Storage keys
@@ -89,10 +77,14 @@ async function withRetry<T>(
     } catch (error) {
       lastError = error as Error;
 
-      // Don't retry on auth errors
+      // Don't retry on permanent errors (auth, permission, malformed request)
       if (lastError.message.includes("Not connected") ||
           lastError.message.includes("Session expired") ||
-          lastError.message.includes("401")) {
+          lastError.message.includes("401") ||
+          lastError.message.includes("Bad Request") ||
+          lastError.message.includes("400") ||
+          lastError.message.includes("organizer") ||
+          lastError.message.includes("can't be rescheduled")) {
         throw lastError;
       }
 
@@ -119,96 +111,82 @@ export interface CalendarOperationResult {
 
 /**
  * Hook for Google Calendar OAuth authentication
- * Uses PKCE (Proof Key for Code Exchange) for security
+ * Uses PKCE via AuthRequest + WebBrowser.openAuthSessionAsync.
+ * Flow: app → Google (HTTPS) → Supabase redirect function → daywise:// deep link → token exchange
  */
 export function useGoogleCalendarAuth() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+  // Holds the AuthRequest between connect() and token exchange so codeVerifier is accessible
+  const authRequestRef = useRef<AuthSession.AuthRequest | null>(null);
 
   const clientId = getClientId();
+  const clientSecret = getClientSecret();
 
-  // In Expo Go, use the auth proxy (no scheme). In dev builds, use custom scheme.
-  const redirectUri = isExpoGo
-    ? AuthSession.makeRedirectUri({ path: "oauth" })
-    : AuthSession.makeRedirectUri({ scheme: "daywise", path: "oauth" });
-
-  // Debug: log once on mount only
   useEffect(() => {
     if (__DEV__) {
-      console.log("[GoogleCalendar] Running in Expo Go:", isExpoGo);
       console.log("[GoogleCalendar] Client ID:", clientId ? "SET" : "MISSING!");
-      console.log("[GoogleCalendar] Redirect URI:", redirectUri);
+      console.log("[GoogleCalendar] Client secret:", clientSecret ? "SET" : "MISSING!");
+      console.log("[GoogleCalendar] Redirect URI:", OAUTH_REDIRECT_URI);
     }
-  }, []);
-
-  // Create the auth request with PKCE
-  const [request, response, promptAsync] = AuthSession.useAuthRequest(
-    {
-      clientId,
-      scopes: SCOPES,
-      redirectUri,
-      usePKCE: true,
-      extraParams: {
-        access_type: "offline",
-        prompt: "consent",
-      },
-    },
-    discovery
-  );
-
-  // Check connection status on mount
-  useEffect(() => {
     checkConnectionStatus();
   }, []);
 
-  // Handle OAuth response
-  useEffect(() => {
-    if (response?.type === "success" && response.params.code) {
-      exchangeCodeForTokens(response.params.code);
-    }
-  }, [response]);
+  // Re-check connection status when the screen comes back into focus,
+  // so the UI updates immediately after returning from the OAuth flow.
+  useFocusEffect(
+    useCallback(() => {
+      checkConnectionStatus();
+    }, [])
+  );
 
   const checkConnectionStatus = async () => {
     try {
       setIsLoading(true);
+      console.log("[GoogleCalendar] Checking connection status...");
       const tokens = await getGoogleTokens();
-      setIsConnected(!!tokens);
+      const connected = !!tokens;
+      console.log("[GoogleCalendar] Connected:", connected, tokens ? `| token expires: ${new Date(tokens.expiry_date).toISOString()}` : "");
+      setIsConnected(connected);
 
       const lastSync = await SecureStore.getItemAsync(STORAGE_KEYS.lastSyncTime);
       if (lastSync) {
         setLastSyncTime(new Date(parseInt(lastSync)));
       }
     } catch (error) {
-      console.error("[useGoogleCalendarAuth] Error checking status:", error);
+      console.error("[GoogleCalendar] checkConnectionStatus error:", error);
       setIsConnected(false);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const exchangeCodeForTokens = async (code: string) => {
+  const exchangeCodeForTokens = async (code: string, codeVerifier: string) => {
     try {
       setIsLoading(true);
-
-      if (!request?.codeVerifier) {
-        throw new Error("No code verifier available");
-      }
-
-      const clientSecret = getClientSecret();
+      console.log("[GoogleCalendar] Exchanging auth code for tokens...");
+      console.log("[GoogleCalendar] Code (first 8 chars):", code.slice(0, 8) + "...");
+      console.log("[GoogleCalendar] Redirect URI:", OAUTH_REDIRECT_URI);
+      console.log("[GoogleCalendar] Client ID:", clientId ? clientId.slice(0, 20) + "..." : "MISSING");
+      console.log("[GoogleCalendar] Code verifier present:", !!codeVerifier);
+      console.log("[GoogleCalendar] Client secret:", clientSecret ? "SET" : "MISSING");
 
       const tokenResponse = await AuthSession.exchangeCodeAsync(
         {
           clientId,
-          clientSecret, // Required for web, undefined for mobile (PKCE)
+          clientSecret,
           code,
-          redirectUri,
-          extraParams: {
-            code_verifier: request.codeVerifier,
-          },
+          redirectUri: OAUTH_REDIRECT_URI,
+          extraParams: { code_verifier: codeVerifier },
         },
         discovery
       );
+
+      console.log("[GoogleCalendar] Token exchange success");
+      console.log("[GoogleCalendar] Has access token:", !!tokenResponse.accessToken);
+      console.log("[GoogleCalendar] Has refresh token:", !!tokenResponse.refreshToken);
+      console.log("[GoogleCalendar] Expires in (s):", tokenResponse.expiresIn);
 
       const tokens: GoogleCalendarTokens = {
         access_token: tokenResponse.accessToken,
@@ -220,33 +198,90 @@ export function useGoogleCalendarAuth() {
         scope: SCOPES.join(" "),
       };
 
+      if (!tokens.refresh_token) {
+        console.warn("[GoogleCalendar] No refresh token — user may need to re-consent next time");
+      }
+
       await saveGoogleTokens(tokens);
       setIsConnected(true);
+      console.log("[GoogleCalendar] Tokens saved, starting calendar sync...");
 
-      // Sync calendar events after connecting
-      await syncCalendarEvents();
-
-      console.log("[useGoogleCalendarAuth] Successfully connected to Google Calendar");
-    } catch (error) {
-      console.error("[useGoogleCalendarAuth] Token exchange error:", error);
-      throw error;
+      await syncCalendarEventsInternal();
+      console.log("[GoogleCalendar] Successfully connected to Google Calendar");
+    } catch (error: any) {
+      console.error("[GoogleCalendar] Token exchange FAILED");
+      console.error("[GoogleCalendar] Error message:", error?.message);
+      console.error("[GoogleCalendar] Error detail:", JSON.stringify(error));
     } finally {
       setIsLoading(false);
     }
   };
 
   const connect = useCallback(async () => {
-    if (!request) {
-      console.warn("[useGoogleCalendarAuth] Auth request not ready");
-      return;
-    }
-    await promptAsync();
-  }, [request, promptAsync]);
+    try {
+      console.log("[GoogleCalendar] connect() called");
+      console.log("[GoogleCalendar] Client ID:", clientId ? "SET" : "MISSING");
 
-  const disconnect = useCallback(async () => {
+      // Build auth request — codeVerifier is populated after makeAuthUrlAsync resolves
+      const authRequest = new AuthSession.AuthRequest({
+        clientId,
+        scopes: SCOPES,
+        redirectUri: OAUTH_REDIRECT_URI,
+        usePKCE: true,
+        extraParams: {
+          access_type: "offline",
+          prompt: "consent",
+        },
+      });
+      authRequestRef.current = authRequest;
+
+      const authUrl = await authRequest.makeAuthUrlAsync(discovery);
+      console.log("[GoogleCalendar] Auth URL built, code verifier ready:", !!authRequest.codeVerifier);
+      console.log("[GoogleCalendar] Opening OAuth browser...");
+
+      // createTask: false reduces the Android race condition where AppState fires
+      // before the Linking redirect event, causing a false 'dismiss' result
+      const result = await WebBrowser.openAuthSessionAsync(authUrl, "daywise://", {
+        createTask: false,
+      });
+
+      console.log("[GoogleCalendar] Browser result type:", result.type);
+
+      if (result.type === "success") {
+        console.log("[GoogleCalendar] OAuth success — URL:", result.url);
+        const urlObj = new URL(result.url);
+        const code = urlObj.searchParams.get("code");
+        const error = urlObj.searchParams.get("error");
+
+        if (error) {
+          console.error("[GoogleCalendar] OAuth error param:", error);
+          return;
+        }
+
+        if (!code) {
+          console.error("[GoogleCalendar] No code in redirect URL");
+          return;
+        }
+
+        if (!authRequest.codeVerifier) {
+          console.error("[GoogleCalendar] Code verifier missing after makeAuthUrlAsync");
+          return;
+        }
+
+        await exchangeCodeForTokens(code, authRequest.codeVerifier);
+      } else if (result.type === "cancel" || result.type === "dismiss") {
+        console.log("[GoogleCalendar] OAuth cancelled/dismissed by user");
+      }
+    } catch (error: any) {
+      console.error("[GoogleCalendar] connect() error:", error?.message);
+      setIsLoading(false);
+    }
+  }, [clientId, clientSecret]);
+
+  const disconnect = useCallback(async (deleteEvents = true) => {
     try {
       setIsLoading(true);
-      await disconnectGoogleCalendar();
+      await disconnectGoogleCalendar(deleteEvents);
       setIsConnected(false);
       setLastSyncTime(null);
     } catch (error) {
@@ -257,20 +292,21 @@ export function useGoogleCalendarAuth() {
     }
   }, []);
 
+  const syncCalendarEventsInternal = async () => {
+    const startDate = new Date();
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate() + 14);
+    await fetchGoogleCalendarEvents(startDate, endDate);
+    const now = Date.now();
+    await SecureStore.setItemAsync(STORAGE_KEYS.lastSyncTime, now.toString());
+    setLastSyncTime(new Date(now));
+    console.log("[useGoogleCalendarAuth] Calendar sync complete");
+  };
+
   const syncCalendarEvents = useCallback(async () => {
     try {
       setIsLoading(true);
-      const startDate = new Date();
-      const endDate = new Date();
-      endDate.setDate(endDate.getDate() + 14); // Sync next 14 days
-
-      await fetchGoogleCalendarEvents(startDate, endDate);
-
-      const now = Date.now();
-      await SecureStore.setItemAsync(STORAGE_KEYS.lastSyncTime, now.toString());
-      setLastSyncTime(new Date(now));
-
-      console.log("[useGoogleCalendarAuth] Calendar sync complete");
+      await syncCalendarEventsInternal();
     } catch (error) {
       console.error("[useGoogleCalendarAuth] Sync error:", error);
       throw error;
@@ -286,7 +322,7 @@ export function useGoogleCalendarAuth() {
     connect,
     disconnect,
     syncCalendarEvents,
-    isReady: !!request,
+    isReady: true,
   };
 }
 
@@ -447,18 +483,34 @@ export async function fetchGoogleCalendarEvents(
       throw new Error("Not authenticated");
     }
 
-    // Upsert events to Supabase (insert or update based on google_event_id)
-    for (const event of calendarEvents) {
+    // Exclude events already owned by app tasks (they show as tasks in the UI,
+    // so importing them as calendar_events would create visible duplicates).
+    const { data: taskEventRows } = await supabase
+      .from("tasks")
+      .select("google_event_id")
+      .eq("user_id", user.id)
+      .not("google_event_id", "is", null);
+
+    const taskEventIds = new Set((taskEventRows || []).map((t: any) => t.google_event_id));
+    const externalEvents = calendarEvents.filter((e) => !taskEventIds.has(e.google_event_id));
+
+    // Delete-then-upsert within the sync window so orphaned rows (events deleted
+    // from Google) are automatically removed on every full sync.
+    await supabase
+      .from("calendar_events")
+      .delete()
+      .eq("user_id", user.id)
+      .gte("start_time", startDate.toISOString())
+      .lte("start_time", endDate.toISOString());
+
+    // Upsert external events — delete above handles orphans, upsert handles
+    // any edge cases where start_time falls just outside the delete window.
+    for (const event of externalEvents) {
       const { error } = await supabase
         .from("calendar_events")
         .upsert(
-          {
-            ...event,
-            user_id: user.id,
-          },
-          {
-            onConflict: "user_id,google_event_id",
-          }
+          { ...event, user_id: user.id },
+          { onConflict: "user_id,google_event_id" }
         );
 
       if (error) {
@@ -504,14 +556,8 @@ export async function createGoogleCalendarEvent(
     const event = {
       summary: title,
       description: description || `Task scheduled via DayWise`,
-      start: {
-        dateTime: startTime,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      },
-      end: {
-        dateTime: endTime,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      },
+      start: { dateTime: startTime },
+      end: { dateTime: endTime },
       reminders: {
         useDefault: false,
         overrides: [
@@ -564,15 +610,11 @@ export async function updateGoogleCalendarEvent(
     const event = {
       summary: title,
       description: description || `Task scheduled via DayWise`,
-      start: {
-        dateTime: startTime,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      },
-      end: {
-        dateTime: endTime,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      },
+      start: { dateTime: startTime },
+      end: { dateTime: endTime },
     };
+
+    console.log("[updateGoogleCalendarEvent] PATCH eventId:", eventId, "body:", JSON.stringify(event));
 
     const response = await fetch(
       `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
@@ -587,9 +629,12 @@ export async function updateGoogleCalendarEvent(
     );
 
     if (!response.ok) {
-      const error = await response.json();
-      console.error("[updateGoogleCalendarEvent] API error:", error);
-      throw new Error(error.error?.message || "Failed to update calendar event");
+      const errorBody = await response.json();
+      console.error("[updateGoogleCalendarEvent] API error:", JSON.stringify(errorBody, null, 2));
+      if (response.status === 400) {
+        throw new Error("This event can't be rescheduled — you may not be the organizer, or it belongs to a shared calendar.");
+      }
+      throw new Error(errorBody.error?.message || "Failed to update calendar event");
     }
 
     console.log("[updateGoogleCalendarEvent] Updated event:", eventId);
@@ -632,8 +677,9 @@ export async function deleteGoogleCalendarEvent(eventId: string): Promise<void> 
 
 /**
  * Disconnect Google Calendar (revoke tokens and clear storage)
+ * @param deleteEvents - if true, also removes synced calendar_events from DB (default true)
  */
-export async function disconnectGoogleCalendar(): Promise<void> {
+export async function disconnectGoogleCalendar(deleteEvents = true): Promise<void> {
   try {
     const tokens = await getGoogleTokens();
 
@@ -642,13 +688,10 @@ export async function disconnectGoogleCalendar(): Promise<void> {
       try {
         await fetch(`https://oauth2.googleapis.com/revoke?token=${tokens.access_token}`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
         });
       } catch (revokeError) {
         console.warn("[disconnectGoogleCalendar] Revoke failed:", revokeError);
-        // Continue with cleanup even if revoke fails
       }
     }
 
@@ -658,13 +701,14 @@ export async function disconnectGoogleCalendar(): Promise<void> {
     await SecureStore.deleteItemAsync(STORAGE_KEYS.tokenExpiry);
     await SecureStore.deleteItemAsync(STORAGE_KEYS.lastSyncTime);
 
-    // Clear calendar events from database
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      await supabase.from("calendar_events").delete().eq("user_id", user.id);
+    if (deleteEvents) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        await supabase.from("calendar_events").delete().eq("user_id", user.id);
+      }
     }
 
-    console.log("[disconnectGoogleCalendar] Disconnected and cleared data");
+    console.log("[disconnectGoogleCalendar] Disconnected, deleteEvents:", deleteEvents);
   } catch (error) {
     console.error("[disconnectGoogleCalendar]", error);
     throw error;
@@ -761,26 +805,36 @@ export async function safeUpdateCalendarEvent(
       updateGoogleCalendarEvent(eventId, title, description, startTime, endTime)
     );
 
+    // Mirror the new times into our local Supabase cache
+    await supabase
+      .from("calendar_events")
+      .update({ start_time: startTime, end_time: endTime, synced_at: new Date().toISOString() })
+      .eq("google_event_id", eventId);
+
     return { success: true, eventId };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error("[safeUpdateCalendarEvent] Failed:", errorMessage);
 
-    // Save pending operation for later retry
-    await savePendingCalendarOperation({
-      type: "update",
-      eventId,
-      title,
-      description,
-      startTime,
-      endTime,
-      timestamp: Date.now(),
-    });
+    const isPermanent = errorMessage.includes("organizer") || errorMessage.includes("Bad Request") || errorMessage.includes("Session expired");
+
+    // Only queue for retry if the failure is transient (network, token expiry)
+    if (!isPermanent) {
+      await savePendingCalendarOperation({
+        type: "update",
+        eventId,
+        title,
+        description,
+        startTime,
+        endTime,
+        timestamp: Date.now(),
+      });
+    }
 
     return {
       success: false,
       error: errorMessage,
-      needsRetry: !errorMessage.includes("Session expired"),
+      needsRetry: !isPermanent,
     };
   }
 }

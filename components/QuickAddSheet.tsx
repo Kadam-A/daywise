@@ -19,6 +19,7 @@ import {
   ActivityIndicator,
   Animated,
   Dimensions,
+  Alert,
 } from "react-native";
 import { Text } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -32,9 +33,11 @@ import { useSubscription } from "@/contexts/SubscriptionContext";
 import { useAppColors } from "@/contexts/ThemeContext";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { scheduleTask } from "@/lib/scheduling";
+import { AIRateLimitError } from "@/lib/openai";
 import { safeCreateCalendarEvent } from "@/lib/google-calendar";
 import { scheduleTaskReminder } from "@/lib/notifications";
 import { trackTaskCreated, trackTaskScheduled, updateFunnel } from "@/lib/analytics";
+import { incrementCreatedTaskCount } from "@/lib/review";
 import SchedulingModal from "@/components/SchedulingModal";
 
 type Duration = "30" | "60" | "120" | "custom";
@@ -242,6 +245,7 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
 
       await trackTaskCreated(schedulingMethod);
       await updateFunnel("first_task_at");
+      incrementCreatedTaskCount(); // fire-and-forget
 
       setCreatedTask(insertedTask as Task);
       setShowSchedulingModal(true);
@@ -295,6 +299,15 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
 
       setSchedulingSlots(result.slots);
     } catch (err) {
+      if (err instanceof AIRateLimitError) {
+        setSchedulingSlots(err.fallbackSlots);
+        Alert.alert(
+          "Whoa, you're on a scheduling spree! 🚀",
+          "We're using our smart algorithm to find your times for now. Super AI will be back in about an hour.",
+          [{ text: "Got it" }]
+        );
+        return;
+      }
       console.error("[QuickAdd] Scheduling error:", err);
       setSchedulingError(err instanceof Error ? err.message : "Failed to find available times");
     } finally {

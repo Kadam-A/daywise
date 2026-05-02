@@ -115,7 +115,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     storage: customStorage,
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: false, // We're not using web URLs for auth
+    detectSessionInUrl: false,
+    flowType: 'implicit',
   },
 });
 

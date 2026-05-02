@@ -5,7 +5,7 @@
  * Clean, focused interface that guides users naturally
  */
 
-import { View, StyleSheet, ScrollView, Pressable, Platform, KeyboardAvoidingView, Animated, Keyboard } from "react-native";
+import { View, StyleSheet, ScrollView, Pressable, Platform, KeyboardAvoidingView, Animated, Keyboard, Alert } from "react-native";
 import { Text, TextInput, HelperText, ActivityIndicator } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -17,11 +17,13 @@ import { format, addDays, endOfDay } from "date-fns";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import SchedulingModal from "@/components/SchedulingModal";
 import { scheduleTask } from "@/lib/scheduling";
+import { AIRateLimitError } from "@/lib/openai";
 import { Task, TimeSlot, UserProfile, CalendarEvent, RecurrenceRule } from "@/lib/types";
 import { safeCreateCalendarEvent } from "@/lib/google-calendar";
 import { scheduleTaskReminder } from "@/lib/notifications";
 import { useSubscription } from "@/contexts/SubscriptionContext";
 import { trackTaskCreated, trackTaskScheduled, updateFunnel, trackTourAIScheduled } from "@/lib/analytics";
+import { incrementCreatedTaskCount } from "@/lib/review";
 import { useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
 import TourTooltip from "@/components/TourTooltip";
@@ -279,9 +281,9 @@ export default function AddTaskScreen() {
 
       if (insertError) throw insertError;
 
-      // Track analytics
       await trackTaskCreated(schedulingMethod);
       await updateFunnel("first_task_at");
+      incrementCreatedTaskCount(); // fire-and-forget
 
       setCreatedTask(insertedTask as Task);
       setSchedulingSlots([]);
@@ -353,6 +355,15 @@ export default function AddTaskScreen() {
 
       setSchedulingSlots(result.slots);
     } catch (err) {
+      if (err instanceof AIRateLimitError) {
+        setSchedulingSlots(err.fallbackSlots);
+        Alert.alert(
+          "Whoa, you're on a scheduling spree! 🚀",
+          "We're using our smart algorithm to find your times for now. Super AI will be back in about an hour.",
+          [{ text: "Got it" }]
+        );
+        return;
+      }
       console.error("[AddTask] Scheduling error:", err);
       setSchedulingError(err instanceof Error ? err.message : "Failed to find available times");
     } finally {

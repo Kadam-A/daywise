@@ -13,10 +13,9 @@ import {
   Pressable,
   Alert,
   TextInput,
-  Modal,
 } from 'react-native';
 import { Text, ActivityIndicator } from 'react-native-paper';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { supabase } from '@/lib/supabase';
@@ -40,13 +39,13 @@ const COLORS = {
 
 export default function AccountSettingsScreen() {
   const appColors = useAppColors();
+  const insets = useSafeAreaInsets();
   const { subscription, isPro, isTrialing, trialDaysRemaining } = useSubscription();
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // Fetch user email on mount
   React.useEffect(() => {
     const fetchUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
@@ -55,20 +54,20 @@ export default function AccountSettingsScreen() {
     fetchUser();
   }, []);
 
+  const resetModal = () => {
+    setConfirmingDelete(false);
+    setConfirmText('');
+  };
+
   const handleDeleteAccount = async () => {
-    if (deleteConfirmText.toUpperCase() !== 'DELETE') {
-      Alert.alert('Error', 'Please type DELETE to confirm');
-      return;
-    }
+    if (confirmText !== 'DELETE') return;
 
     setIsDeleting(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('Not authenticated');
-      }
+      if (!session) throw new Error('Not authenticated');
 
-      // Call delete-account edge function
+      console.log('[DeleteFlow] — calling delete-account edge function');
       const response = await fetch(
         `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/delete-account`,
         {
@@ -81,17 +80,13 @@ export default function AccountSettingsScreen() {
       );
 
       const result = await response.json();
+      console.log('[DeleteFlow] — edge function response:', result.success, result.error ?? '');
+      if (!result.success) throw new Error(result.error || 'Failed to delete account');
 
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to delete account');
-      }
-
-      // Logout from RevenueCat
+      console.log('[DeleteFlow] — deletion complete, signing out');
       await logoutPurchases();
-
-      // Sign out locally
       await supabase.auth.signOut();
-
+      resetModal();
       Alert.alert(
         'Account Deleted',
         'Your account and all data have been permanently deleted.',
@@ -105,8 +100,6 @@ export default function AccountSettingsScreen() {
       );
     } finally {
       setIsDeleting(false);
-      setShowDeleteModal(false);
-      setDeleteConfirmText('');
     }
   };
 
@@ -150,155 +143,131 @@ export default function AccountSettingsScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
-        {/* Account Info */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: appColors.textSecondary }]}>Account Info</Text>
-          <View style={[styles.infoCard, { backgroundColor: appColors.surface }]}>
-            <View style={styles.infoRow}>
-              <MaterialCommunityIcons name="email-outline" size={20} color={appColors.textSecondary} />
-              <View style={styles.infoContent}>
-                <Text style={[styles.infoLabel, { color: appColors.textTertiary }]}>Email</Text>
-                <Text style={[styles.infoValue, { color: appColors.textPrimary }]}>{userEmail || 'Loading...'}</Text>
-              </View>
-            </View>
-          </View>
-        </View>
+      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
 
-        {/* Subscription */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: appColors.textSecondary }]}>Subscription</Text>
-          <View style={[styles.subscriptionCard, { backgroundColor: appColors.surface }]}>
-            <View style={styles.subscriptionHeader}>
-              <View style={[
-                styles.planBadge,
-                { backgroundColor: appColors.chipBg },
-                isPro && { backgroundColor: appColors.primary },
-                isTrialing && { backgroundColor: appColors.success },
-              ]}>
-                <Text style={[
-                  styles.planBadgeText,
-                  { color: appColors.textSecondary },
-                  (isPro || isTrialing) && styles.planBadgeTextPro,
-                ]}>
-                  {isPro ? 'PRO' : isTrialing ? 'TRIAL' : 'FREE'}
-                </Text>
-              </View>
-              <Text style={[styles.planName, { color: appColors.textPrimary }]}>{getPlanDisplayName()}</Text>
-            </View>
-
-            {subscription?.cancel_at_period_end && (
-              <View style={[styles.cancelNotice, { backgroundColor: appColors.errorLight }]}>
-                <MaterialCommunityIcons name="alert-circle-outline" size={18} color={appColors.error} />
-                <Text style={[styles.cancelNoticeText, { color: appColors.error }]}>
-                  Subscription will end on {subscription.current_period_end
-                    ? new Date(subscription.current_period_end).toLocaleDateString()
-                    : 'period end'}
-                </Text>
-              </View>
-            )}
-
-            <Pressable style={[styles.manageButton, { borderTopColor: appColors.border }]} onPress={handleManageSubscription}>
-              <Text style={[styles.manageButtonText, { color: appColors.primary }]}>
-                {isPro || isTrialing ? 'Manage Subscription' : 'Upgrade to Pro'}
+        {/* When confirming deletion, show only the confirm card near the top */}
+        {confirmingDelete ? (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: appColors.error }]}>Confirm Deletion</Text>
+            <View style={[styles.dangerCard, { backgroundColor: appColors.surface, borderColor: `${appColors.error}40` }]}>
+              <Text style={[styles.dangerLabel, { color: appColors.textPrimary, marginBottom: 4 }]}>This cannot be undone</Text>
+              <Text style={[styles.dangerDescription, { color: appColors.textSecondary, marginBottom: 16 }]}>
+                All your tasks, calendar connections, and settings will be permanently deleted.
               </Text>
-              <MaterialCommunityIcons name="chevron-right" size={20} color={appColors.primary} />
-            </Pressable>
-          </View>
-        </View>
-
-        {/* Danger Zone */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: appColors.error }]}>Danger Zone</Text>
-          <View style={[styles.dangerCard, { backgroundColor: appColors.surface, borderColor: `${appColors.error}40` }]}>
-            <View style={styles.dangerContent}>
-              <Text style={[styles.dangerLabel, { color: appColors.textPrimary }]}>Delete Account</Text>
-              <Text style={[styles.dangerDescription, { color: appColors.textSecondary }]}>
-                Permanently delete your account and all associated data. This cannot be undone.
+              {isPro && (
+                <View style={[styles.subscriptionWarning, { backgroundColor: appColors.warningLight }]}>
+                  <MaterialCommunityIcons name="information" size={16} color={appColors.textSecondary} />
+                  <Text style={[styles.subscriptionWarningText, { color: appColors.textSecondary }]}>
+                    Your subscription will be cancelled automatically
+                  </Text>
+                </View>
+              )}
+              <Text style={[styles.confirmLabel, { color: appColors.textSecondary, marginBottom: 8 }]}>
+                Type <Text style={{ color: appColors.error, fontWeight: '700' }}>DELETE</Text> to confirm
               </Text>
-            </View>
-            <Pressable style={[styles.deleteButton, { backgroundColor: appColors.error }]} onPress={() => setShowDeleteModal(true)}>
-              <Text style={styles.deleteButtonText}>Delete Account</Text>
-            </Pressable>
-          </View>
-        </View>
-      </ScrollView>
-
-      {/* Delete Confirmation Modal */}
-      <Modal
-        visible={showDeleteModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowDeleteModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: appColors.surface }]}>
-            <View style={styles.modalIcon}>
-              <MaterialCommunityIcons name="alert-circle" size={48} color={appColors.error} />
-            </View>
-            <Text style={[styles.modalTitle, { color: appColors.textPrimary }]}>Delete Account?</Text>
-            <Text style={[styles.modalDescription, { color: appColors.textSecondary }]}>
-              This will permanently delete all your data including:
-            </Text>
-            <View style={[styles.deleteList, { backgroundColor: appColors.inputBg }]}>
-              <Text style={[styles.deleteListItem, { color: appColors.textPrimary }]}>• All tasks and schedules</Text>
-              <Text style={[styles.deleteListItem, { color: appColors.textPrimary }]}>• Calendar connections</Text>
-              <Text style={[styles.deleteListItem, { color: appColors.textPrimary }]}>• Personality profile</Text>
-              <Text style={[styles.deleteListItem, { color: appColors.textPrimary }]}>• Account settings</Text>
-            </View>
-
-            {isPro && (
-              <View style={[styles.subscriptionWarning, { backgroundColor: appColors.warningLight }]}>
-                <MaterialCommunityIcons name="information" size={18} color={appColors.textSecondary} />
-                <Text style={[styles.subscriptionWarningText, { color: appColors.textSecondary }]}>
-                  Your subscription will be cancelled automatically
-                </Text>
+              <TextInput
+                style={[styles.deleteConfirmInput, {
+                  borderColor: confirmText === 'DELETE' ? appColors.error : appColors.border,
+                  color: appColors.textPrimary,
+                  backgroundColor: appColors.inputBg,
+                }]}
+                value={confirmText}
+                onChangeText={setConfirmText}
+                placeholder="DELETE"
+                placeholderTextColor={appColors.textTertiary}
+                autoCapitalize="characters"
+              />
+              <View style={styles.modalActions}>
+                <Pressable style={[styles.cancelButton, { backgroundColor: appColors.chipBg }]} onPress={resetModal}>
+                  <Text style={[styles.cancelButtonText, { color: appColors.textSecondary }]}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.confirmDeleteButton, { backgroundColor: confirmText === 'DELETE' ? appColors.error : appColors.chipBg }]}
+                  onPress={handleDeleteAccount}
+                  disabled={isDeleting || confirmText !== 'DELETE'}
+                >
+                  {isDeleting
+                    ? <ActivityIndicator size="small" color="#FFFFFF" />
+                    : <Text style={[styles.confirmDeleteButtonText, confirmText !== 'DELETE' && { color: appColors.textTertiary }]}>Delete Forever</Text>
+                  }
+                </Pressable>
               </View>
-            )}
+            </View>
+          </View>
+        ) : (
+          <>
+            {/* Account Info */}
+            <View style={styles.section}>
+              <Text style={[styles.sectionTitle, { color: appColors.textSecondary }]}>Account Info</Text>
+              <View style={[styles.infoCard, { backgroundColor: appColors.surface }]}>
+                <View style={styles.infoRow}>
+                  <MaterialCommunityIcons name="email-outline" size={20} color={appColors.textSecondary} />
+                  <View style={styles.infoContent}>
+                    <Text style={[styles.infoLabel, { color: appColors.textTertiary }]}>Email</Text>
+                    <Text style={[styles.infoValue, { color: appColors.textPrimary }]}>{userEmail || 'Loading...'}</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
 
-            <Text style={[styles.confirmLabel, { color: appColors.textPrimary }]}>Type DELETE to confirm:</Text>
-            <TextInput
-              style={[styles.confirmInput, { borderColor: appColors.border, color: appColors.textPrimary }]}
-              value={deleteConfirmText}
-              onChangeText={setDeleteConfirmText}
-              placeholder="DELETE"
-              placeholderTextColor={appColors.textTertiary}
-              autoCapitalize="characters"
-              autoCorrect={false}
-            />
-
-            <View style={styles.modalActions}>
-              <Pressable
-                style={[styles.cancelButton, { backgroundColor: appColors.chipBg }]}
-                onPress={() => {
-                  setShowDeleteModal(false);
-                  setDeleteConfirmText('');
-                }}
-              >
-                <Text style={[styles.cancelButtonText, { color: appColors.textSecondary }]}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.confirmDeleteButton,
-                  { backgroundColor: appColors.error },
-                  deleteConfirmText.toUpperCase() !== 'DELETE' && { backgroundColor: appColors.chipBg },
-                ]}
-                onPress={handleDeleteAccount}
-                disabled={isDeleting || deleteConfirmText.toUpperCase() !== 'DELETE'}
-              >
-                {isDeleting ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <Text style={[
-                    styles.confirmDeleteButtonText,
-                    deleteConfirmText.toUpperCase() !== 'DELETE' && { color: appColors.textTertiary },
-                  ]}>Delete Forever</Text>
+            {/* Subscription */}
+            <View style={styles.section}>
+              <Text style={[styles.sectionTitle, { color: appColors.textSecondary }]}>Subscription</Text>
+              <View style={[styles.subscriptionCard, { backgroundColor: appColors.surface }]}>
+                <View style={styles.subscriptionHeader}>
+                  <View style={[
+                    styles.planBadge,
+                    { backgroundColor: appColors.chipBg },
+                    isPro && { backgroundColor: appColors.primary },
+                    isTrialing && { backgroundColor: appColors.success },
+                  ]}>
+                    <Text style={[
+                      styles.planBadgeText,
+                      { color: appColors.textSecondary },
+                      (isPro || isTrialing) && styles.planBadgeTextPro,
+                    ]}>
+                      {isPro ? 'PRO' : isTrialing ? 'TRIAL' : 'FREE'}
+                    </Text>
+                  </View>
+                  <Text style={[styles.planName, { color: appColors.textPrimary }]}>{getPlanDisplayName()}</Text>
+                </View>
+                {subscription?.cancel_at_period_end && (
+                  <View style={[styles.cancelNotice, { backgroundColor: appColors.errorLight }]}>
+                    <MaterialCommunityIcons name="alert-circle-outline" size={18} color={appColors.error} />
+                    <Text style={[styles.cancelNoticeText, { color: appColors.error }]}>
+                      Subscription will end on {subscription.current_period_end
+                        ? new Date(subscription.current_period_end).toLocaleDateString()
+                        : 'period end'}
+                    </Text>
+                  </View>
                 )}
-              </Pressable>
+                <Pressable style={[styles.manageButton, { borderTopColor: appColors.border }]} onPress={handleManageSubscription}>
+                  <Text style={[styles.manageButtonText, { color: appColors.primary }]}>
+                    {isPro || isTrialing ? 'Manage Subscription' : 'Upgrade to Pro'}
+                  </Text>
+                  <MaterialCommunityIcons name="chevron-right" size={20} color={appColors.primary} />
+                </Pressable>
+              </View>
             </View>
-          </View>
-        </View>
-      </Modal>
+
+            {/* Danger Zone */}
+            <View style={styles.section}>
+              <Text style={[styles.sectionTitle, { color: appColors.error }]}>Danger Zone</Text>
+              <View style={[styles.dangerCard, { backgroundColor: appColors.surface, borderColor: `${appColors.error}40` }]}>
+                <View style={styles.dangerContent}>
+                  <Text style={[styles.dangerLabel, { color: appColors.textPrimary }]}>Delete Account</Text>
+                  <Text style={[styles.dangerDescription, { color: appColors.textSecondary }]}>
+                    Permanently delete your account and all associated data. This cannot be undone.
+                  </Text>
+                </View>
+                <Pressable style={[styles.deleteButton, { backgroundColor: appColors.error }]} onPress={() => setConfirmingDelete(true)}>
+                  <Text style={styles.deleteButtonText}>Delete Account</Text>
+                </Pressable>
+              </View>
+            </View>
+          </>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -478,49 +447,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
 
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  modalContent: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 20,
-    padding: 24,
-    width: '100%',
-    maxWidth: 360,
-  },
-  modalIcon: {
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: COLORS.textPrimary,
-    textAlign: 'center',
-    marginBottom: 12,
-  },
-  modalDescription: {
-    fontSize: 15,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  deleteList: {
-    backgroundColor: '#F8F9FB',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-  },
-  deleteListItem: {
-    fontSize: 14,
-    color: COLORS.textPrimary,
-    marginBottom: 6,
-  },
   subscriptionWarning: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -541,17 +467,17 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     marginBottom: 8,
   },
-  confirmInput: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
+  deleteConfirmInput: {
+    borderWidth: 2,
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 14,
-    fontSize: 16,
+    fontSize: 18,
     marginBottom: 20,
     textAlign: 'center',
-    letterSpacing: 2,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 4,
+    width: '100%',
   },
   modalActions: {
     flexDirection: 'row',

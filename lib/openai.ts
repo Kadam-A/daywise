@@ -19,6 +19,20 @@ import { supabase } from "./supabase";
 import { TimeSlot, Task, UserProfile } from "./types";
 
 /**
+ * Thrown when the user hits the 25/hour Super AI rate limit.
+ * Carries fallback (algorithm-only) slots so the UI can still show results
+ * while displaying a friendly "come back in an hour" message.
+ */
+export class AIRateLimitError extends Error {
+  fallbackSlots: TimeSlot[];
+  constructor(fallbackSlots: TimeSlot[]) {
+    super("AI_RATE_LIMIT");
+    this.name = "AIRateLimitError";
+    this.fallbackSlots = fallbackSlots;
+  }
+}
+
+/**
  * STAGE 2: AI Ranking
  *
  * Takes 15-20 pre-filtered candidates and asks AI to pick the best 3
@@ -53,7 +67,21 @@ export async function rankSlotsWithAI(
       },
     });
 
-    if (error) throw error;
+    if (error) {
+      // Try to read the error body to detect rate limiting specifically
+      let code: string | undefined;
+      try {
+        const body = await (error as any).context?.json?.();
+        code = body?.code;
+      } catch {}
+
+      if (code === "RATE_LIMIT") {
+        const fallback = buildFallback(candidates, task, userProfile);
+        throw new AIRateLimitError(fallback);
+      }
+
+      throw error;
+    }
 
     // AI returns top 3 with scores and personalized reasons
     const aiRanked: TimeSlot[] = data.recommendations;
@@ -67,39 +95,46 @@ export async function rankSlotsWithAI(
     }
     return aiRanked.slice(0, 3); // Ensure max 3
   } catch (error) {
-    console.error("[rankSlotsWithAI] AI ranking failed:", error);
+    // Re-throw AIRateLimitError — the UI needs to show a popup for this
+    if (error instanceof AIRateLimitError) throw error;
 
-    // FALLBACK: Use top 3 from algorithm with PERSONALIZED reasons
-    // Enforce diversity: pick slots at least 2 hours apart on same day
-    const picked: TimeSlot[] = [];
-    for (const slot of candidates) {
-      if (picked.length >= 3) break;
-      const slotStart = new Date(slot.start);
-      const isTooClose = picked.some((p) => {
-        const pStart = new Date(p.start);
-        const diffMs = Math.abs(slotStart.getTime() - pStart.getTime());
-        const diffHours = diffMs / (1000 * 60 * 60);
-        const sameDay = slotStart.toDateString() === pStart.toDateString();
-        return sameDay && diffHours < 2;
-      });
-      if (!isTooClose) {
-        picked.push({
-          ...slot,
-          reason: generatePersonalizedFallbackReason(slot, picked.length, task, userProfile),
-        });
-      }
-    }
-    // Fill remaining if needed
-    for (const slot of candidates) {
-      if (picked.length >= 3) break;
-      if (picked.some((p) => p.start === slot.start)) continue;
+    console.error("[rankSlotsWithAI] AI ranking failed:", error);
+    return buildFallback(candidates, task, userProfile);
+  }
+}
+
+/**
+ * Build algorithm-only fallback slots (diverse, personalised reasons).
+ * Used both when AI fails generically and when rate limited.
+ */
+function buildFallback(candidates: TimeSlot[], task: Task, userProfile: UserProfile): TimeSlot[] {
+  const picked: TimeSlot[] = [];
+  for (const slot of candidates) {
+    if (picked.length >= 3) break;
+    const slotStart = new Date(slot.start);
+    const isTooClose = picked.some((p) => {
+      const pStart = new Date(p.start);
+      const diffMs = Math.abs(slotStart.getTime() - pStart.getTime());
+      const diffHours = diffMs / (1000 * 60 * 60);
+      const sameDay = slotStart.toDateString() === pStart.toDateString();
+      return sameDay && diffHours < 2;
+    });
+    if (!isTooClose) {
       picked.push({
         ...slot,
         reason: generatePersonalizedFallbackReason(slot, picked.length, task, userProfile),
       });
     }
-    return picked;
   }
+  for (const slot of candidates) {
+    if (picked.length >= 3) break;
+    if (picked.some((p) => p.start === slot.start)) continue;
+    picked.push({
+      ...slot,
+      reason: generatePersonalizedFallbackReason(slot, picked.length, task, userProfile),
+    });
+  }
+  return picked;
 }
 
 /**

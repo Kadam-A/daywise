@@ -41,12 +41,15 @@ const STATIC_COLORS = {
   success: "#5FBF73",
 };
 
+const GOOGLE_BLUE = "#4285F4";
+
 interface DayTimelineProps {
   tasks: Task[];
   calendarEvents: CalendarEvent[];
   date: Date;
   onTaskPress: (task: Task) => void;
   onTaskReschedule?: (task: Task, newStart: string, newEnd: string) => void;
+  onEventPress?: (event: CalendarEvent) => void;
   startHour?: number;
   endHour?: number;
   autoScrollToNow?: boolean;
@@ -374,6 +377,7 @@ export default function DayTimeline({
   date,
   onTaskPress,
   onTaskReschedule,
+  onEventPress,
   startHour = 0,
   endHour = 23,
   autoScrollToNow = false,
@@ -541,28 +545,29 @@ export default function DayTimeline({
               />
             ))}
 
-            {/* Calendar events (gray) */}
+            {/* Calendar events (Google blue accent) */}
             {dayEvents.map((event) => {
               const { top, height } = getItemStyle(
                 event.start_time,
                 event.end_time
               );
               return (
-                <View
+                <Pressable
                   key={event.id}
+                  onPress={() => onEventPress?.(event)}
                   style={[
                     styles.eventBlock,
                     styles.calendarEvent,
-                    { top, height, backgroundColor: appColors.background, borderLeftColor: appColors.textTertiary },
+                    { top, height, backgroundColor: GOOGLE_BLUE + "12", borderLeftColor: GOOGLE_BLUE },
                   ]}
                 >
-                  <Text style={[styles.calendarEventText, { color: appColors.textSecondary }]} numberOfLines={1}>
+                  <Text style={[styles.calendarEventText, { color: GOOGLE_BLUE }]} numberOfLines={1}>
                     {event.title}
                   </Text>
-                  <Text style={[styles.calendarEventTime, { color: appColors.textTertiary }]}>
+                  <Text style={[styles.calendarEventTime, { color: GOOGLE_BLUE + "AA" }]}>
                     {format(parseISO(event.start_time), "h:mm a")}
                   </Text>
-                </View>
+                </Pressable>
               );
             })}
 

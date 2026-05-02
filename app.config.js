@@ -5,7 +5,7 @@ export default {
     version: '1.0.0',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
-    scheme: 'daywise',
+    scheme: ['daywise', 'com.googleusercontent.apps.541614241772-lm016bl0368rvthk668ct54962pokt2i'],
     userInterfaceStyle: 'automatic',
     newArchEnabled: true,
     splash: {
@@ -27,7 +27,7 @@ export default {
     android: {
       package: 'com.adam.daywise',
       adaptiveIcon: {
-        foregroundImage: './ic_launcher_foreground.png',
+        foregroundImage: './assets/images/android-icon-foreground.png',
         backgroundColor: '#6D529E',
         monochromeImage: './assets/images/android-icon-monochrome.png',
       },
@@ -49,6 +49,7 @@ export default {
       bundler: 'metro',
     },
     plugins: [
+      './plugins/withPhoneOnly',
       'expo-router',
       [
         '@sentry/react-native/expo',
