@@ -48,11 +48,12 @@ interface QuickAddSheetProps {
   onDismiss: () => void;
   onCreated: () => void;
   preselectedDate?: Date;
+  presetSlot?: { start: Date; end: Date }; // calendar tap-to-create: skips scheduling step
 }
 
 const SHEET_HEIGHT = 400; // approximate max sheet height for animation
 
-export default function QuickAddSheet({ visible, onDismiss, onCreated, preselectedDate }: QuickAddSheetProps) {
+export default function QuickAddSheet({ visible, onDismiss, onCreated, preselectedDate, presetSlot }: QuickAddSheetProps) {
   const appColors = useAppColors();
   const insets = useSafeAreaInsets();
   const { isPro, refreshAIUsage } = useSubscription();
@@ -111,6 +112,13 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
   const [schedulingError, setSchedulingError] = useState<string | null>(null);
   const [busySlots, setBusySlots] = useState<{ start: string; end: string; title: string }[]>([]);
 
+  // Preset slot editing state (calendar tap-to-create)
+  const [localPresetStart, setLocalPresetStart] = useState<Date | null>(null);
+  const [localPresetEnd, setLocalPresetEnd] = useState<Date | null>(null);
+  const [showPresetStartPicker, setShowPresetStartPicker] = useState(false);
+  const [showPresetEndPicker, setShowPresetEndPicker] = useState(false);
+  const [overlapWarning, setOverlapWarning] = useState<string | null>(null);
+
   // Animate in: slide sheet + fade overlay + focus input together
   useEffect(() => {
     if (visible) {
@@ -119,6 +127,7 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
       setDescription("");
       setShowDescription(false);
       AsyncStorage.getItem("defaultTaskDuration").then((saved) => {
+        if (presetSlot) return; // preset slot sets duration directly
         if (saved) {
           const mins = parseInt(saved);
           const validOptions: Duration[] = ["30", "60", "120"];
@@ -134,6 +143,29 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
       setSchedulingMethod("MANUAL");
       setDueDate(endOfDay(addDays(new Date(), 1)));
       setShowDatePicker(false);
+
+      // Set duration from preset slot (overrides AsyncStorage default)
+      setLocalPresetStart(null);
+      setLocalPresetEnd(null);
+      setShowPresetStartPicker(false);
+      setShowPresetEndPicker(false);
+      setOverlapWarning(null);
+      if (presetSlot) {
+        const slotMins = Math.round((presetSlot.end.getTime() - presetSlot.start.getTime()) / 60000);
+        const validOptions: Duration[] = ["30", "60", "120"];
+        if (validOptions.includes(String(slotMins) as Duration)) {
+          setDuration(String(slotMins) as Duration);
+        } else {
+          setDuration("custom");
+          setCustomDuration(String(slotMins));
+        }
+        setLocalPresetStart(presetSlot.start);
+        setLocalPresetEnd(presetSlot.end);
+        // Load busy slots silently for overlap detection
+        supabase.auth.getUser().then(({ data: { user } }) => {
+          if (user) loadBusySlots(user.id);
+        });
+      }
       setLoading(false);
       setError(null);
       setShowSchedulingModal(false);
@@ -167,7 +199,7 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
       // Focus at ~100ms — keyboard starts rising while sheet is still sliding up
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [visible]);
+  }, [visible, presetSlot]);
 
   // Animate out then truly dismiss
   const animateDismiss = useCallback((callback?: () => void) => {
@@ -190,6 +222,20 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
     });
   }, [onDismiss, overlayOpacity, sheetTranslateY]);
 
+  // Overlap detection: runs whenever the preset time window changes
+  useEffect(() => {
+    if (!localPresetStart || !localPresetEnd || !presetSlot || !busySlots.length) {
+      setOverlapWarning(null);
+      return;
+    }
+    const conflict = busySlots.find((slot) => {
+      const s = new Date(slot.start);
+      const e = new Date(slot.end);
+      return localPresetStart < e && localPresetEnd > s;
+    });
+    setOverlapWarning(conflict ? conflict.title : null);
+  }, [localPresetStart, localPresetEnd, busySlots, presetSlot]);
+
   const handleExpand = () => {
     animateDismiss(() => {
       onDismiss();
@@ -208,6 +254,79 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
 
   const handleCreate = async () => {
     if (!title.trim()) return;
+
+    // Fast path: preset time slot from calendar tap — insert directly as scheduled, skip modal
+    if (presetSlot) {
+      try {
+        setLoading(true);
+        setError(null);
+        Keyboard.dismiss();
+
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) throw new Error("Not authenticated");
+
+        const effectiveStart = localPresetStart ?? presetSlot.start;
+        const slotEnd = localPresetEnd ?? new Date(effectiveStart.getTime() + resolvedDurationMinutes * 60000);
+        const slotDurationMins = Math.round((slotEnd.getTime() - effectiveStart.getTime()) / 60000);
+
+        const { data: insertedTask, error: insertError } = await supabase
+          .from("tasks")
+          .insert({
+            user_id: user.id,
+            title: title.trim(),
+            description: description.trim() || null,
+            duration_minutes: slotDurationMins,
+            priority,
+            task_type: null,
+            scheduling_method: "MANUAL",
+            due_date: (() => {
+              const d = effectiveStart;
+              return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).toISOString();
+            })(),
+            status: "scheduled",
+            scheduled_start: effectiveStart.toISOString(),
+            scheduled_end: slotEnd.toISOString(),
+            tags: [],
+          })
+          .select()
+          .single();
+
+        if (insertError) throw insertError;
+
+        await trackTaskCreated("MANUAL");
+        await updateFunnel("first_task_at");
+        incrementCreatedTaskCount();
+
+        const calendarResult = await safeCreateCalendarEvent(
+          title.trim(),
+          description.trim() || null,
+          effectiveStart.toISOString(),
+          slotEnd.toISOString()
+        );
+
+        if (calendarResult.success && calendarResult.eventId && insertedTask) {
+          await supabase
+            .from("tasks")
+            .update({ google_event_id: calendarResult.eventId })
+            .eq("id", insertedTask.id);
+        }
+
+        if (insertedTask) {
+          await scheduleTaskReminder(insertedTask as Task);
+          await trackTaskScheduled("MANUAL");
+          await updateFunnel("first_schedule_at");
+        }
+
+        animateDismiss(() => onCreated());
+        return;
+      } catch (err) {
+        console.error("[QuickAdd] Preset slot error:", err);
+        setError(err instanceof Error ? err.message : "Failed to create task");
+        setLoading(false);
+        return;
+      }
+    }
+
     if (schedulingMethod === "SMART" && !dueDate) {
       setError("Due date is required for AI scheduling");
       return;
@@ -429,6 +548,8 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
       ? Math.max(5, Math.min(480, parseInt(customDuration) || 45))
       : parseInt(duration);
 
+  const presetDisplayEnd = localPresetEnd;
+
   const priorityOptions: { value: Priority; label: string; color: string }[] = [
     { value: "low", label: "Low", color: appColors.priorityLow },
     { value: "medium", label: "Med", color: appColors.priorityMedium },
@@ -478,10 +599,12 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
               {/* Handle bar */}
               <View style={[styles.handleBar, { backgroundColor: appColors.border }]} />
 
-              {/* Expand button */}
-              <Pressable style={[styles.expandButton, { backgroundColor: appColors.chipBg }]} onPress={handleExpand}>
-                <MaterialCommunityIcons name="arrow-expand" size={18} color={appColors.textTertiary} />
-              </Pressable>
+              {/* Expand button — hidden when preset slot is provided */}
+              {!presetSlot && (
+                <Pressable style={[styles.expandButton, { backgroundColor: appColors.chipBg }]} onPress={handleExpand}>
+                  <MaterialCommunityIcons name="arrow-expand" size={18} color={appColors.textTertiary} />
+                </Pressable>
+              )}
 
               {/* Title input */}
               <TextInput
@@ -523,7 +646,104 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
               {/* Divider */}
               <View style={[styles.divider, { backgroundColor: appColors.chipBg }]} />
 
-              {/* Scheduling method toggle — prominent, always visible */}
+              {/* Preset time editor — start and end tappable independently */}
+              {presetSlot && localPresetStart && presetDisplayEnd && (
+                <>
+                  <View style={[
+                    styles.presetTimePill,
+                    { backgroundColor: overlapWarning ? `${appColors.error}12` : appColors.primaryLight },
+                  ]}>
+                    {/* Row 1: icon + date label */}
+                    <View style={styles.presetTimeHeader}>
+                      <MaterialCommunityIcons
+                        name="clock-check-outline"
+                        size={13}
+                        color={overlapWarning ? appColors.error : appColors.primary}
+                      />
+                      <Text style={[styles.presetTimePillDate, { color: overlapWarning ? appColors.error : appColors.primary }]}>
+                        {format(localPresetStart, "EEE, MMM d")}
+                      </Text>
+                    </View>
+                    {/* Row 2: start chip – end chip */}
+                    <View style={styles.presetTimeRow}>
+                      <Pressable
+                        style={[styles.presetTimeChip, { backgroundColor: overlapWarning ? `${appColors.error}22` : `${appColors.primary}22` }]}
+                        onPress={() => setShowPresetStartPicker(true)}
+                      >
+                        <Text style={[styles.presetTimeChipText, { color: overlapWarning ? appColors.error : appColors.primary }]}>
+                          {format(localPresetStart, "h:mm a")}
+                        </Text>
+                        <MaterialCommunityIcons name="pencil-outline" size={11} color={overlapWarning ? appColors.error : appColors.primary} />
+                      </Pressable>
+                      <Text style={[styles.presetTimeSep, { color: overlapWarning ? appColors.error : appColors.primary }]}>–</Text>
+                      <Pressable
+                        style={[styles.presetTimeChip, { backgroundColor: overlapWarning ? `${appColors.error}22` : `${appColors.primary}22` }]}
+                        onPress={() => setShowPresetEndPicker(true)}
+                      >
+                        <Text style={[styles.presetTimeChipText, { color: overlapWarning ? appColors.error : appColors.primary }]}>
+                          {format(presetDisplayEnd, "h:mm a")}
+                        </Text>
+                        <MaterialCommunityIcons name="pencil-outline" size={11} color={overlapWarning ? appColors.error : appColors.primary} />
+                      </Pressable>
+                    </View>
+                  </View>
+                  {overlapWarning && (
+                    <View style={styles.overlapWarningRow}>
+                      <MaterialCommunityIcons name="alert-circle" size={13} color={appColors.error} />
+                      <Text style={[styles.overlapWarningText, { color: appColors.error }]}>
+                        Conflicts with "{overlapWarning}" — adjust the time above
+                      </Text>
+                    </View>
+                  )}
+                  {showPresetStartPicker && (
+                    <DateTimePicker
+                      value={localPresetStart}
+                      mode="time"
+                      minuteInterval={5}
+                      onChange={(_, date) => {
+                        setShowPresetStartPicker(Platform.OS === "ios");
+                        if (date && localPresetEnd) {
+                          const delta = localPresetEnd.getTime() - localPresetStart.getTime();
+                          const updated = new Date(localPresetStart);
+                          updated.setHours(date.getHours(), date.getMinutes(), 0, 0);
+                          setLocalPresetStart(updated);
+                          setLocalPresetEnd(new Date(updated.getTime() + delta));
+                        }
+                      }}
+                    />
+                  )}
+                  {showPresetEndPicker && (
+                    <DateTimePicker
+                      value={presetDisplayEnd}
+                      mode="time"
+                      minuteInterval={5}
+                      onChange={(_, date) => {
+                        setShowPresetEndPicker(Platform.OS === "ios");
+                        if (date) {
+                          const updated = new Date(presetDisplayEnd);
+                          updated.setHours(date.getHours(), date.getMinutes(), 0, 0);
+                          if (updated <= localPresetStart) {
+                            updated.setTime(localPresetStart.getTime() + 15 * 60000);
+                          }
+                          setLocalPresetEnd(updated);
+                          // Sync duration chip to match the new actual window
+                          const newMins = Math.round((updated.getTime() - localPresetStart.getTime()) / 60000);
+                          const validOptions: Duration[] = ["30", "60", "120"];
+                          if (validOptions.includes(String(newMins) as Duration)) {
+                            setDuration(String(newMins) as Duration);
+                          } else {
+                            setDuration("custom");
+                            setCustomDuration(String(newMins));
+                          }
+                        }
+                      }}
+                    />
+                  )}
+                </>
+              )}
+
+              {/* Scheduling method toggle — hidden when preset slot is provided */}
+              {!presetSlot && (
               <View style={[styles.methodToggle, { backgroundColor: appColors.chipBg }]}>
                 <Pressable
                   style={[
@@ -582,6 +802,7 @@ export default function QuickAddSheet({ visible, onDismiss, onCreated, preselect
                   )}
                 </Pressable>
               </View>
+              )}
 
               {/* Chip row — duration scroll + priority cycle button */}
               <View style={styles.chipRow}>
@@ -926,6 +1147,58 @@ const styles = StyleSheet.create({
   priorityButtonText: {
     fontSize: 13,
     fontWeight: "600",
+  },
+  presetTimePill: {
+    flexDirection: "column",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  presetTimeHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  presetTimePillDate: {
+    fontSize: 13,
+    fontWeight: "500",
+    opacity: 0.75,
+  },
+  presetTimeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  presetTimeChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  presetTimeChipText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  presetTimeSep: {
+    fontSize: 13,
+    fontWeight: "400",
+    opacity: 0.6,
+  },
+  overlapWarningRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 4,
+    marginBottom: 10,
+  },
+  overlapWarningText: {
+    fontSize: 12,
+    fontWeight: "500",
+    flex: 1,
   },
   methodToggle: {
     flexDirection: "row",

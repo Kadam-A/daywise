@@ -10,7 +10,7 @@
  */
 
 import React, { useMemo, useEffect, useState, useRef, useCallback } from "react";
-import { View, StyleSheet, ScrollView, Pressable, Platform } from "react-native";
+import { View, StyleSheet, ScrollView, Pressable, Platform, GestureResponderEvent } from "react-native";
 import { Text, Surface } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Task, CalendarEvent } from "@/lib/types";
@@ -50,6 +50,7 @@ interface DayTimelineProps {
   onTaskPress: (task: Task) => void;
   onTaskReschedule?: (task: Task, newStart: string, newEnd: string) => void;
   onEventPress?: (event: CalendarEvent) => void;
+  onEmptySlotPress?: (time: Date) => void;
   startHour?: number;
   endHour?: number;
   autoScrollToNow?: boolean;
@@ -378,11 +379,27 @@ export default function DayTimeline({
   onTaskPress,
   onTaskReschedule,
   onEventPress,
+  onEmptySlotPress,
   startHour = 0,
   endHour = 23,
   autoScrollToNow = false,
 }: DayTimelineProps) {
   const appColors = useAppColors();
+
+  const handleEmptyTap = useCallback((e: GestureResponderEvent) => {
+    if (!onEmptySlotPress) return;
+    const tapY = e.nativeEvent.locationY;
+    const rawMins = (tapY / HOUR_HEIGHT) * 60;
+    const snapped = Math.round(rawMins / 30) * 30;
+    const totalMins = startHour * 60 + snapped;
+    const hour = Math.floor(totalMins / 60);
+    const minute = totalMins % 60;
+    if (hour < startHour || hour >= endHour) return;
+    const tapped = new Date(date);
+    tapped.setHours(hour, minute, 0, 0);
+    if (tapped < new Date()) return;
+    onEmptySlotPress(tapped);
+  }, [onEmptySlotPress, date, startHour, endHour]);
   const getPriorityColor = (priority: string) =>
     priority === "high" ? appColors.priorityHigh : priority === "medium" ? appColors.priorityMedium : appColors.priorityLow;
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -532,8 +549,8 @@ export default function DayTimeline({
             ))}
           </View>
 
-          {/* Events column */}
-          <View style={[styles.eventsColumn, { height: totalHeight }]}>
+          {/* Events column — tappable background for tap-to-create */}
+          <Pressable style={[styles.eventsColumn, { height: totalHeight }]} onPress={handleEmptyTap}>
             {/* Hour grid lines */}
             {hours.map((hour) => (
               <View
@@ -607,7 +624,7 @@ export default function DayTimeline({
                 <View style={styles.currentTimeLine} />
               </View>
             )}
-          </View>
+          </Pressable>
         </View>
       </ScrollView>
 

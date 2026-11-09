@@ -330,7 +330,7 @@ export default function SchedulingModal({
 
           {/* MANUAL Scheduling UI - NOT in ScrollView since TimeSlotPicker has its own */}
           {schedulingMethod === "MANUAL" && !isLoading && !error && (
-            <View style={[styles.manualContent, { paddingBottom: insets.bottom + 16 }]}>
+            <View style={[styles.manualContent, { paddingBottom: Math.max(insets.bottom, 8) }]}>
               <TimeSlotPicker
                 task={task}
                 busySlots={busySlots}
@@ -573,7 +573,7 @@ const styles = StyleSheet.create({
   manualContent: {
     flex: 1,
     paddingTop: 0,
-    paddingHorizontal: 20,
+    paddingHorizontal: 14,
     paddingBottom: 0,
   },
   loadingContainer: {

@@ -42,6 +42,8 @@ import TourPulseDot from "@/components/TourPulseDot";
 import TourRewardModal from "@/components/TourRewardModal";
 import TourStatesModal from "@/components/TourStatesModal";
 import GoogleEventSheet from "@/components/GoogleEventSheet";
+import PostOnboardingTooltips, { LayoutRect } from "@/components/PostOnboardingTooltips";
+import TrialBottomSheet from "@/components/TrialBottomSheet";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -211,6 +213,76 @@ function NextUpCardEnhanced({ task, onMarkDone, onPress, now }: { task: Task; on
             >
               <MaterialCommunityIcons name="check" size={14} color="#FFFFFF" />
             </Pressable>
+          </View>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+const GOOGLE_BLUE_NEXT = "#4285F4";
+
+function NextUpCalendarEventCard({ event, onPress, now }: { event: CalendarEvent; onPress: () => void; now: Date }) {
+  const { urgency, timeUntil, progress } = useMemo(() => {
+    const start = new Date(event.start_time);
+    const end = new Date(event.end_time);
+    const minutesUntil = differenceInMinutes(start, now);
+    let urgency: "normal" | "soon" | "now";
+    let timeUntil: string;
+    let progress = 0;
+    if (now >= start && now < end) {
+      urgency = "now";
+      const totalDuration = differenceInMinutes(end, start);
+      progress = Math.min(1, differenceInMinutes(now, start) / totalDuration);
+      timeUntil = `${differenceInMinutes(end, now)}m left`;
+    } else if (minutesUntil <= 60) {
+      urgency = "soon";
+      timeUntil = minutesUntil <= 0 ? "Starting now" : `in ${minutesUntil}m`;
+    } else {
+      urgency = "normal";
+      if (minutesUntil >= 24 * 60) {
+        const days = Math.floor(minutesUntil / (24 * 60));
+        const hours = Math.floor((minutesUntil % (24 * 60)) / 60);
+        timeUntil = hours > 0 ? `in ${days}d ${hours}h` : `in ${days}d`;
+      } else {
+        timeUntil = `in ${Math.floor(minutesUntil / 60)}h ${minutesUntil % 60}m`;
+      }
+    }
+    return { urgency, timeUntil, progress };
+  }, [event.start_time, event.end_time, now]);
+
+  return (
+    <Pressable onPress={onPress} style={styles.nextUpWrapper}>
+      <View style={[styles.nextUpCard, { backgroundColor: `${GOOGLE_BLUE_NEXT}15` }]}>
+        <View style={styles.nextUpContent}>
+          <View style={styles.nextUpHeader}>
+            <View style={styles.nextUpLabelRow}>
+              <MaterialCommunityIcons
+                name={urgency === "now" ? "play-circle" : urgency === "soon" ? "clock-fast" : "clock-outline"}
+                size={12}
+                color={GOOGLE_BLUE_NEXT}
+              />
+              <Text style={[styles.nextUpLabel, { color: GOOGLE_BLUE_NEXT }]}>
+                {urgency === "now" ? "IN PROGRESS" : urgency === "soon" ? "COMING UP" : "NEXT UP"}
+              </Text>
+            </View>
+            <Text style={[styles.nextUpTime, { color: GOOGLE_BLUE_NEXT }]}>{timeUntil}</Text>
+          </View>
+          <View style={styles.nextUpBottomRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.nextUpTitle, { color: GOOGLE_BLUE_NEXT }]} numberOfLines={1}>{event.title}</Text>
+              <Text style={[styles.nextUpSchedule, { color: GOOGLE_BLUE_NEXT }]}>
+                {format(new Date(event.start_time), "h:mm a")}–{format(new Date(event.end_time), "h:mm a")}
+              </Text>
+              {urgency === "now" && (
+                <View style={styles.nextUpProgress}>
+                  <ProgressBar progress={progress} color={GOOGLE_BLUE_NEXT} style={[styles.progressBar, { flex: 1 }]} />
+                </View>
+              )}
+            </View>
+            <View style={[styles.nextUpButton, { backgroundColor: GOOGLE_BLUE_NEXT }]}>
+              <MaterialCommunityIcons name="google" size={14} color="#fff" />
+            </View>
           </View>
         </View>
       </View>
@@ -611,6 +683,7 @@ export default function HomeScreen() {
   const completeToastAnim = useRef(new Animated.Value(0)).current;
   const completeToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [sourceFilter, setSourceFilter] = useState<"all" | "google" | "tasks">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [showRestOfWeek, setShowRestOfWeek] = useState(false);
@@ -625,6 +698,29 @@ export default function HomeScreen() {
       if (val) setPinnedTags(JSON.parse(val));
     });
   }, []);
+
+  // Post-onboarding tooltip flow
+  const [showPostOnboardingTooltips, setShowPostOnboardingTooltips] = useState(false);
+  const [showTrialBottomSheet, setShowTrialBottomSheet] = useState(false);
+  const [nextUpCardRect, setNextUpCardRect] = useState<LayoutRect | null>(null);
+  const [fabRect, setFabRect] = useState<LayoutRect | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const shouldShow = await AsyncStorage.getItem("showPostOnboardingTooltips");
+      const hasSeen = await AsyncStorage.getItem("hasSeenTooltips");
+      if (shouldShow === "true" && !hasSeen) {
+        setShowPostOnboardingTooltips(true);
+      }
+    })();
+  }, []);
+
+  const handleTooltipsDone = async () => {
+    setShowPostOnboardingTooltips(false);
+    await AsyncStorage.setItem("hasSeenTooltips", "true");
+    await AsyncStorage.removeItem("showPostOnboardingTooltips");
+    setShowTrialBottomSheet(true);
+  };
 
   const savePinnedTag = async (tag: string) => {
     const trimmed = tag.trim().toLowerCase();
@@ -1127,7 +1223,7 @@ export default function HomeScreen() {
 
   const loadCalendarEvents = async () => {
     try {
-      const startDate = new Date();
+      const startDate = startOfDay(new Date()); // start of today so in-progress events are included
       const endDate = new Date();
       endDate.setDate(endDate.getDate() + 14);
 
@@ -1249,6 +1345,16 @@ export default function HomeScreen() {
     ).sort((a, b) => new Date(a.scheduled_start!).getTime() - new Date(b.scheduled_start!).getTime());
   }, [parentTasks, overdueIds, missedSlotIds]);
 
+  const restOfWeekEvents = useMemo(() => {
+    const weekEnd = endOfWeek(new Date(), { weekStartsOn: 1 });
+    return calendarEvents.filter(e =>
+      !e.all_day &&
+      !isToday(parseISO(e.start_time)) &&
+      isAfter(parseISO(e.start_time), new Date()) &&
+      isBefore(parseISO(e.start_time), weekEnd)
+    ).sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
+  }, [calendarEvents]);
+
   const pendingTasks = useMemo(
     () => parentTasks.filter((t) => t.status === "pending_schedule" && !overdueIds.has(t.id) && !missedSlotIds.has(t.id)),
     [parentTasks, overdueIds, missedSlotIds]
@@ -1273,6 +1379,12 @@ export default function HomeScreen() {
       return endTime >= now;
     }) || null;
   }, [parentTasks, overdueIds]);
+
+  const nextCalendarEvent = useMemo(() => {
+    return calendarEvents
+      .filter(e => !e.all_day && new Date(e.end_time) >= now)
+      .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())[0] ?? null;
+  }, [calendarEvents, now]);
 
   const todayEvents = useMemo(
     () => calendarEvents.filter((e) => isToday(parseISO(e.start_time))),
@@ -1557,33 +1669,84 @@ export default function HomeScreen() {
           </>
         )}
 
-        {/* Next Up Card */}
-        {nextTask && (
-          <View style={styles.section}>
-            <NextUpCardEnhanced
-              task={nextTask}
-              onMarkDone={() => handleMarkDone(nextTask)}
-              onPress={() => handleTaskPress(nextTask)}
-              now={now}
-            />
-          </View>
-        )}
+        {/* Next Up Card — shows whichever of task or calendar event comes soonest */}
+        {(nextTask || nextCalendarEvent) && (() => {
+          const taskTime = nextTask?.scheduled_start ? new Date(nextTask.scheduled_start).getTime() : Infinity;
+          const eventTime = nextCalendarEvent ? new Date(nextCalendarEvent.start_time).getTime() : Infinity;
+          const showEvent = eventTime < taskTime;
+          return (
+            <View style={styles.section}>
+              {showEvent ? (
+                <NextUpCalendarEventCard
+                  event={nextCalendarEvent!}
+                  onPress={() => setSelectedCalendarEvent(nextCalendarEvent!)}
+                  now={now}
+                />
+              ) : (
+                <View
+                  onLayout={(e) => {
+                    const { x, y, width, height } = e.nativeEvent.layout;
+                    setNextUpCardRect({ x, y, width, height });
+                  }}
+                >
+                  <NextUpCardEnhanced
+                    task={nextTask!}
+                    onMarkDone={() => handleMarkDone(nextTask!)}
+                    onPress={() => handleTaskPress(nextTask!)}
+                    now={now}
+                  />
+                </View>
+              )}
+            </View>
+          );
+        })()}
 
         {/* Today's Agenda - Compact View */}
-        {(todayTasks.length > 0 || todayEvents.length > 0) && (
-          <View style={styles.section}>
-            <SectionHeader
-              title="Today's Schedule"
-              count={todayTasks.length + todayEvents.length}
-              onViewAll={() => router.push({ pathname: "/(tabs)/calendar", params: { date: format(new Date(), "yyyy-MM-dd"), view: "day" } })}
-            />
-            <View style={[styles.agendaWrapper, { backgroundColor: appColors.surface }]}>
-              {/* Combine and sort today's items by time */}
-              {[...todayTasks.map(t => ({ type: 'task' as const, item: t, time: t.scheduled_start })),
-                ...todayEvents.map(e => ({ type: 'event' as const, item: e, time: e.start_time }))]
-                .sort((a, b) => new Date(a.time!).getTime() - new Date(b.time!).getTime())
-                .slice(0, 5)
-                .map((entry, index) => (
+        {(todayTasks.length > 0 || todayEvents.length > 0) && (() => {
+          const displayedTasks = sourceFilter === "google" ? [] : todayTasks;
+          const displayedEvents = sourceFilter === "tasks" ? [] : todayEvents;
+          const totalCount = displayedTasks.length + displayedEvents.length;
+          const combinedItems = [
+            ...displayedTasks.map(t => ({ type: 'task' as const, item: t, time: t.scheduled_start! })),
+            ...displayedEvents.map(e => ({ type: 'event' as const, item: e, time: e.start_time })),
+          ].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+          const restOfWeekItems = [
+            ...(sourceFilter === "google" ? [] : restOfWeekTasks.map(t => ({ type: 'task' as const, item: t, time: t.scheduled_start! }))),
+            ...(sourceFilter === "tasks" ? [] : restOfWeekEvents.map(e => ({ type: 'event' as const, item: e, time: e.start_time }))),
+          ].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+          return (
+            <View style={styles.section}>
+              <SectionHeader
+                title="Today's Schedule"
+                count={todayTasks.length + todayEvents.length}
+                onViewAll={() => router.push({ pathname: "/(tabs)/calendar", params: { date: format(new Date(), "yyyy-MM-dd"), view: "day" } })}
+              />
+              {/* Source filter chips — only shown when calendar events exist */}
+              {todayEvents.length > 0 && (
+                <View style={styles.sourceFilterRow}>
+                  <Pressable
+                    style={[styles.sourceChip, { backgroundColor: appColors.surface, borderColor: appColors.border }, sourceFilter === "all" && { backgroundColor: appColors.primary, borderColor: appColors.primary }]}
+                    onPress={() => setSourceFilter("all")}
+                  >
+                    <Text style={[styles.sourceChipText, { color: appColors.textSecondary }, sourceFilter === "all" && { color: "#fff" }]}>All</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.sourceChip, { backgroundColor: appColors.surface, borderColor: appColors.border }, sourceFilter === "tasks" && { backgroundColor: appColors.primary, borderColor: appColors.primary }]}
+                    onPress={() => setSourceFilter(sourceFilter === "tasks" ? "all" : "tasks")}
+                  >
+                    <Text style={[styles.sourceChipText, { color: appColors.textSecondary }, sourceFilter === "tasks" && { color: "#fff" }]}>Tasks</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.sourceChip, { backgroundColor: appColors.surface, borderColor: appColors.border }, sourceFilter === "google" && { backgroundColor: "#4285F4", borderColor: "#4285F4" }]}
+                    onPress={() => setSourceFilter(sourceFilter === "google" ? "all" : "google")}
+                  >
+                    <Ionicons name="logo-google" size={11} color={sourceFilter === "google" ? "#fff" : "#4285F4"} />
+                    <Text style={[styles.sourceChipText, { color: "#4285F4" }, sourceFilter === "google" && { color: "#fff" }]}>Google</Text>
+                  </Pressable>
+                </View>
+              )}
+              <View style={[styles.agendaWrapper, { backgroundColor: appColors.surface }]}>
+                {combinedItems.slice(0, 5).map((entry) => (
                   entry.type === 'task' ? (
                     <AgendaTaskItem
                       key={entry.item.id}
@@ -1597,49 +1760,53 @@ export default function HomeScreen() {
                   ) : (
                     <AgendaEventItem key={entry.item.id} event={entry.item as CalendarEvent} onPress={() => setSelectedCalendarEvent(entry.item as CalendarEvent)} />
                   )
-                ))
-              }
-              {(todayTasks.length + todayEvents.length) > 5 && (
-                <Pressable style={styles.seeMoreButton} onPress={() => router.push("/(tabs)/calendar")}>
-                  <Text style={[styles.seeMoreText, { color: appColors.primary }]}>
-                    +{todayTasks.length + todayEvents.length - 5} more items
-                  </Text>
-                  <MaterialCommunityIcons name="chevron-right" size={16} color={appColors.primary} />
-                </Pressable>
-              )}
-
-              {/* Rest of week expand */}
-              {restOfWeekTasks.length > 0 && (
-                <>
-                  <Pressable
-                    style={[styles.restOfWeekToggle, { borderTopColor: appColors.border }]}
-                    onPress={() => setShowRestOfWeek(v => !v)}
-                  >
-                    <MaterialCommunityIcons
-                      name={showRestOfWeek ? "chevron-up" : "chevron-down"}
-                      size={15}
-                      color={appColors.textTertiary}
-                    />
-                    <Text style={[styles.restOfWeekToggleText, { color: appColors.textTertiary }]}>
-                      {showRestOfWeek ? "Hide rest of week" : `Rest of week · ${restOfWeekTasks.length} task${restOfWeekTasks.length !== 1 ? "s" : ""}`}
+                ))}
+                {totalCount > 5 && (
+                  <Pressable style={styles.seeMoreButton} onPress={() => router.push("/(tabs)/calendar")}>
+                    <Text style={[styles.seeMoreText, { color: appColors.primary }]}>
+                      +{totalCount - 5} more items
                     </Text>
+                    <MaterialCommunityIcons name="chevron-right" size={16} color={appColors.primary} />
                   </Pressable>
-                  {showRestOfWeek && restOfWeekTasks.map((task) => (
-                    <TaskCardRefined
-                      key={task.id}
-                      task={task}
-                      onPress={() => handleTaskPress(task)}
-                      onComplete={() => handleMarkDone(task)}
-                      onLongPress={() => handleLongPress(task)}
-                      isSelecting={isSelecting}
-                      isSelected={selectedIds.has(task.id)}
-                    />
-                  ))}
-                </>
-              )}
+                )}
+
+                {/* Rest of week expand */}
+                {restOfWeekItems.length > 0 && (
+                  <>
+                    <Pressable
+                      style={[styles.restOfWeekToggle, { borderTopColor: appColors.border }]}
+                      onPress={() => setShowRestOfWeek(v => !v)}
+                    >
+                      <MaterialCommunityIcons
+                        name={showRestOfWeek ? "chevron-up" : "chevron-down"}
+                        size={15}
+                        color={appColors.textTertiary}
+                      />
+                      <Text style={[styles.restOfWeekToggleText, { color: appColors.textTertiary }]}>
+                        {showRestOfWeek ? "Hide rest of week" : `Rest of week · ${restOfWeekItems.length} item${restOfWeekItems.length !== 1 ? "s" : ""}`}
+                      </Text>
+                    </Pressable>
+                    {showRestOfWeek && restOfWeekItems.map((entry) => (
+                      entry.type === 'task' ? (
+                        <TaskCardRefined
+                          key={entry.item.id}
+                          task={entry.item as Task}
+                          onPress={() => handleTaskPress(entry.item as Task)}
+                          onComplete={() => handleMarkDone(entry.item as Task)}
+                          onLongPress={() => handleLongPress(entry.item as Task)}
+                          isSelecting={isSelecting}
+                          isSelected={selectedIds.has(entry.item.id)}
+                        />
+                      ) : (
+                        <AgendaEventItem key={entry.item.id} event={entry.item as CalendarEvent} onPress={() => setSelectedCalendarEvent(entry.item as CalendarEvent)} />
+                      )
+                    ))}
+                  </>
+                )}
+              </View>
             </View>
-          </View>
-        )}
+          );
+        })()}
 
         {/* Overdue Tasks */}
         {overdueTasks.length > 0 && (
@@ -1915,6 +2082,10 @@ export default function HomeScreen() {
         /* Floating Action Button - solid */
         <Pressable
           style={styles.fabWrapper}
+          onLayout={(e) => {
+            const { x, y, width, height } = e.nativeEvent.layout;
+            setFabRect({ x, y, width, height });
+          }}
           onPress={() => {
             if (tourStep === "tour_add_task_start") {
               setIsManualTour(true);
@@ -2268,6 +2439,19 @@ export default function HomeScreen() {
         event={selectedCalendarEvent}
         onDismiss={() => setSelectedCalendarEvent(null)}
         onUpdated={loadData}
+      />
+
+      {showPostOnboardingTooltips && (
+        <PostOnboardingTooltips
+          nextUpCardRect={nextUpCardRect}
+          fabRect={fabRect}
+          onComplete={handleTooltipsDone}
+        />
+      )}
+
+      <TrialBottomSheet
+        visible={showTrialBottomSheet}
+        onDismiss={() => setShowTrialBottomSheet(false)}
       />
     </SafeAreaView>
   );
@@ -2829,7 +3013,11 @@ const styles = StyleSheet.create({
   agendaEventBadge: {
     flexDirection: "row",
     alignItems: "center",
+    alignSelf: "flex-start",
     gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
   },
   agendaEventLabel: {
     fontSize: 11,
@@ -2866,6 +3054,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "500",
     color: COLORS.textTertiary,
+  },
+
+  sourceFilterRow: {
+    flexDirection: "row",
+    gap: 6,
+    paddingHorizontal: 20,
+    paddingBottom: 8,
+  },
+  sourceChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  sourceChipText: {
+    fontSize: 12,
+    fontWeight: "600",
   },
 
   // Empty States

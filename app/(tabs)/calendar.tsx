@@ -5,6 +5,8 @@
  */
 
 import { View, StyleSheet, ScrollView, Pressable, Animated as RNAnimated } from "react-native";
+import { GestureDetector, Gesture } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import QuickAddSheet from "@/components/QuickAddSheet";
 import {
   Text,
@@ -21,6 +23,7 @@ import { safeUpdateCalendarEvent } from "@/lib/google-calendar";
 import {
   format,
   addDays,
+  addMinutes,
   subDays,
   addWeeks,
   subWeeks,
@@ -81,6 +84,7 @@ export default function CalendarScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [presetSlot, setPresetSlot] = useState<{ start: Date; end: Date } | null>(null);
 
   // Undo toast state for drag-and-drop reschedule
   const [undoInfo, setUndoInfo] = useState<{
@@ -188,6 +192,11 @@ export default function CalendarScreen() {
     }
     setWeekDayCount(count);
   };
+
+  const handleEmptySlotPress = useCallback((time: Date) => {
+    setPresetSlot({ start: time, end: addMinutes(time, 60) });
+    setShowQuickAdd(true);
+  }, []);
 
   const handleTaskPress = (task: Task) => {
     router.push(`/task/${task.id}`);
@@ -318,10 +327,20 @@ export default function CalendarScreen() {
         const endDate = addDays(currentWeek, 2);
         return `${format(currentWeek, "MMM d")} – ${format(endDate, "MMM d")}`;
       }
-      return format(currentWeek, "MMMM yyyy");
+      return format(addDays(currentWeek, weekDayCount - 1), "MMMM yyyy");
     }
     return format(currentMonth, "MMMM yyyy");
   };
+
+  // Horizontal swipe to navigate: left = next period, right = previous period.
+  // failOffsetY ensures vertical scrolling inside timelines/month list still works.
+  const swipeGesture = Gesture.Pan()
+    .activeOffsetX([-15, 15])
+    .failOffsetY([-10, 10])
+    .onEnd((event) => {
+      if (event.translationX < -60) runOnJS(handleNext)();
+      else if (event.translationX > 60) runOnJS(handlePrevious)();
+    });
 
   if (loading) {
     return (
@@ -419,61 +438,68 @@ export default function CalendarScreen() {
         </View>
       </View>
 
-      {/* Day Timeline View - NOT inside ScrollView to avoid nesting issues */}
-      {viewMode === "day" && (
-        <View style={styles.dayTimelineWrapper}>
-          <DayTimeline
-            key={`day-${selectedDate.toISOString()}`}
-            tasks={tasks}
-            calendarEvents={calendarEvents}
-            date={selectedDate}
-            onTaskPress={handleTaskPress}
-            onTaskReschedule={handleTaskReschedule}
-            onEventPress={setSelectedCalendarEvent}
-            autoScrollToNow={true}
-          />
-        </View>
-      )}
+      <GestureDetector gesture={swipeGesture}>
+        <View style={{ flex: 1 }}>
+          {/* Day Timeline View - NOT inside ScrollView to avoid nesting issues */}
+          {viewMode === "day" && (
+            <View style={styles.dayTimelineWrapper}>
+              <DayTimeline
+                key={`day-${selectedDate.toISOString()}`}
+                tasks={tasks}
+                calendarEvents={calendarEvents}
+                date={selectedDate}
+                onTaskPress={handleTaskPress}
+                onTaskReschedule={handleTaskReschedule}
+                onEventPress={setSelectedCalendarEvent}
+                onEmptySlotPress={handleEmptySlotPress}
+                autoScrollToNow={true}
+              />
+            </View>
+          )}
 
-      {/* Week Timeline View */}
-      {viewMode === "week" && (
-        <View style={styles.weekTimelineWrapper}>
-          <WeekTimeline
-            key={`week-${currentWeek.toISOString()}-${weekDayCount}`}
-            weekStart={currentWeek}
-            tasks={tasks}
-            calendarEvents={calendarEvents}
-            onTaskPress={handleTaskPress}
-            onTaskReschedule={handleTaskReschedule}
-            onEventPress={setSelectedCalendarEvent}
-            dayCount={weekDayCount}
-            onDayCountChange={handleDayCountChange}
-          />
-        </View>
-      )}
+          {/* Week Timeline View */}
+          {viewMode === "week" && (
+            <View style={styles.weekTimelineWrapper}>
+              <WeekTimeline
+                key={`week-${currentWeek.toISOString()}-${weekDayCount}`}
+                weekStart={currentWeek}
+                tasks={tasks}
+                calendarEvents={calendarEvents}
+                onTaskPress={handleTaskPress}
+                onTaskReschedule={handleTaskReschedule}
+                onEventPress={setSelectedCalendarEvent}
+                onEmptySlotPress={handleEmptySlotPress}
+                dayCount={weekDayCount}
+                onDayCountChange={handleDayCountChange}
+              />
+            </View>
+          )}
 
-      {/* Month Calendar View */}
-      {viewMode === "month" && (
-        <ScrollView style={styles.content}>
-          <View style={styles.calendarContainer}>
-            <CalendarMonthView
-              month={currentMonth}
-              tasks={tasks}
-              selectedDate={selectedDate}
-              onSelectDate={setSelectedDate}
-            />
-          </View>
-          <View style={styles.dayListContainer}>
-            <CalendarDayList
-              date={selectedDate}
-              tasks={tasks}
-              calendarEvents={calendarEvents}
-              onTaskPress={handleTaskPress}
-              onEventPress={setSelectedCalendarEvent}
-            />
-          </View>
-        </ScrollView>
-      )}
+          {/* Month Calendar View */}
+          {viewMode === "month" && (
+            <ScrollView style={styles.content}>
+              <View style={styles.calendarContainer}>
+                <CalendarMonthView
+                  month={currentMonth}
+                  tasks={tasks}
+                  calendarEvents={calendarEvents}
+                  selectedDate={selectedDate}
+                  onSelectDate={setSelectedDate}
+                />
+              </View>
+              <View style={styles.dayListContainer}>
+                <CalendarDayList
+                  date={selectedDate}
+                  tasks={tasks}
+                  calendarEvents={calendarEvents}
+                  onTaskPress={handleTaskPress}
+                  onEventPress={setSelectedCalendarEvent}
+                />
+              </View>
+            </ScrollView>
+          )}
+        </View>
+      </GestureDetector>
 
       {/* Undo toast for drag-and-drop reschedule */}
       {undoInfo && (
@@ -502,9 +528,10 @@ export default function CalendarScreen() {
       {/* Quick Add Sheet */}
       <QuickAddSheet
         visible={showQuickAdd}
-        onDismiss={() => setShowQuickAdd(false)}
-        onCreated={() => { setShowQuickAdd(false); loadData(); }}
-        preselectedDate={viewMode === "month" ? selectedDate : undefined}
+        onDismiss={() => { setShowQuickAdd(false); setPresetSlot(null); }}
+        onCreated={() => { setShowQuickAdd(false); setPresetSlot(null); loadData(); }}
+        preselectedDate={viewMode !== "week" ? selectedDate : undefined}
+        presetSlot={presetSlot ?? undefined}
       />
 
       <GoogleEventSheet

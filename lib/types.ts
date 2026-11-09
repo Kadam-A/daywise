@@ -554,7 +554,15 @@ export type AnalyticsEventName =
   // Settings events
   | 'settings_updated'
   // Task events
-  | 'task_rescheduled';
+  | 'task_rescheduled'
+  // Post-onboarding flow events
+  | 'first_task_screen_viewed'
+  | 'first_task_scheduled'
+  | 'post_onboarding_tooltip_1_seen'
+  | 'post_onboarding_tooltip_2_seen'
+  | 'post_onboarding_tooltip_3_seen'
+  | 'post_onboarding_tooltips_completed'
+  | 'trial_skipped';
 
 /**
  * User funnel tracking record

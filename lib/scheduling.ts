@@ -19,6 +19,8 @@ import { supabase } from "./supabase";
 import { safeCreateCalendarEvent, safeUpdateCalendarEvent } from "./google-calendar";
 import { scheduleTaskReminder } from "./notifications";
 import { format, isAfter, isBefore, startOfDay } from "date-fns";
+import * as Notifications from "expo-notifications";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 /**
  * MAIN FUNCTION: Schedule a task using two-stage hybrid approach
@@ -194,6 +196,13 @@ export async function saveScheduledSlot(task: Task, slot: TimeSlot): Promise<boo
 
     if (updatedTask) {
       await scheduleTaskReminder(updatedTask as Task);
+    }
+
+    // Cancel day-2 re-engagement notification — user is active, no need to nudge
+    const day2Id = await AsyncStorage.getItem("day2_reengagement_notif_id");
+    if (day2Id) {
+      await Notifications.cancelScheduledNotificationAsync(day2Id);
+      await AsyncStorage.removeItem("day2_reengagement_notif_id");
     }
 
     return true;

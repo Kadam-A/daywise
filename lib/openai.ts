@@ -68,14 +68,18 @@ export async function rankSlotsWithAI(
     });
 
     if (error) {
-      // Try to read the error body to detect rate limiting specifically
       let code: string | undefined;
+      let statusCode: number | undefined;
       try {
+        statusCode = (error as any).context?.status;
         const body = await (error as any).context?.json?.();
         code = body?.code;
-      } catch {}
+        console.warn("[rankSlotsWithAI] Edge Function error:", statusCode, JSON.stringify(body));
+      } catch {
+        console.warn("[rankSlotsWithAI] Edge Function error (status:", statusCode, "— body unreadable)");
+      }
 
-      if (code === "RATE_LIMIT") {
+      if (code === "RATE_LIMIT" || code === "LIMIT_EXCEEDED") {
         const fallback = buildFallback(candidates, task, userProfile);
         throw new AIRateLimitError(fallback);
       }

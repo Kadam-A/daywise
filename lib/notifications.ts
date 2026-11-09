@@ -363,3 +363,59 @@ export async function getScheduledNotifications(): Promise<
 > {
   return await Notifications.getAllScheduledNotificationsAsync();
 }
+
+/**
+ * Schedule a day-2 re-engagement notification (22 hours from now).
+ * Cancelled automatically when the user creates their next task via saveScheduledSlot().
+ */
+export async function scheduleDay2ReEngagement(): Promise<void> {
+  if (isExpoGo) return;
+
+  const existingId = await AsyncStorage.getItem("day2_reengagement_notif_id");
+  if (existingId) {
+    await Notifications.cancelScheduledNotificationAsync(existingId);
+  }
+
+  const fireAt = new Date(Date.now() + 22 * 60 * 60 * 1000);
+  const notifId = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: "How's your day going?",
+      body: "Your tasks are waiting — tap to see what's next.",
+      sound: "default",
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.DATE,
+      date: fireAt,
+    },
+  });
+
+  await AsyncStorage.setItem("day2_reengagement_notif_id", notifId);
+}
+
+/**
+ * Schedule a daily nudge notification at 9:00 AM local time.
+ * Replaces any previously scheduled daily nudge.
+ */
+export async function scheduleDailyNudge(): Promise<void> {
+  if (isExpoGo) return;
+
+  const existingId = await AsyncStorage.getItem("daily_nudge_notif_id");
+  if (existingId) {
+    await Notifications.cancelScheduledNotificationAsync(existingId);
+  }
+
+  const notifId = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: "Plan your day",
+      body: "Tap to see your tasks and let DayWise schedule what's next.",
+      sound: "default",
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.DAILY,
+      hour: 9,
+      minute: 0,
+    },
+  });
+
+  await AsyncStorage.setItem("daily_nudge_notif_id", notifId);
+}

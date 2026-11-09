@@ -17,6 +17,7 @@ import {
   ScrollView,
   Pressable,
   Platform,
+  GestureResponderEvent,
 } from "react-native";
 import { Text } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -55,6 +56,7 @@ interface WeekTimelineProps {
   onTaskPress: (task: Task) => void;
   onTaskReschedule?: (task: Task, newStart: string, newEnd: string) => void;
   onEventPress?: (event: CalendarEvent) => void;
+  onEmptySlotPress?: (time: Date) => void;
   dayCount: DayCount;
   onDayCountChange: (count: DayCount) => void;
   startHour?: number;
@@ -428,12 +430,28 @@ export default function WeekTimeline({
   onTaskPress,
   onTaskReschedule,
   onEventPress,
+  onEmptySlotPress,
   dayCount,
   onDayCountChange,
   startHour = 0,
   endHour = 23,
 }: WeekTimelineProps) {
   const COLORS = useAppColors();
+
+  const handleDayTap = useCallback((day: Date, e: GestureResponderEvent) => {
+    if (!onEmptySlotPress) return;
+    const tapY = e.nativeEvent.locationY;
+    const rawMins = (tapY / HOUR_HEIGHT) * 60;
+    const snapped = Math.round(rawMins / 30) * 30;
+    const totalMins = startHour * 60 + snapped;
+    const hour = Math.floor(totalMins / 60);
+    const minute = totalMins % 60;
+    if (hour < startHour || hour >= endHour) return;
+    const tapped = new Date(day);
+    tapped.setHours(hour, minute, 0, 0);
+    if (tapped < new Date()) return;
+    onEmptySlotPress(tapped);
+  }, [onEmptySlotPress, startHour, endHour]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [dayColumnWidth, setDayColumnWidth] = useState(0);
   const scrollViewRef = useRef<ScrollView>(null);
@@ -684,7 +702,7 @@ export default function WeekTimeline({
               const dayEvents = eventsByDay.get(dayKey) || [];
 
               return (
-                <View key={day.toISOString()} style={styles.dayColumn}>
+                <Pressable key={day.toISOString()} style={styles.dayColumn} onPress={(e) => handleDayTap(day, e)}>
                   {/* Hour grid lines */}
                   {hours.map((hour) => (
                     <View
@@ -771,7 +789,7 @@ export default function WeekTimeline({
                       />
                     );
                   })}
-                </View>
+                </Pressable>
               );
             })}
 

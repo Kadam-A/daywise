@@ -4,48 +4,56 @@
  * User preferences and account management
  */
 
-import { View, StyleSheet, ScrollView, Alert, Pressable, Platform, Modal as RNModal, Animated, Linking } from "react-native";
-import {
-  Text,
-  List,
-  Switch,
-  Button,
-  Divider,
-  Portal,
-  Modal,
-  TextInput,
-  Avatar,
-  ActivityIndicator,
-  Chip,
-  TouchableRipple,
-} from "react-native-paper";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { router } from "expo-router";
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { useFocusEffect } from "expo-router";
-import { supabase, signOut } from "@/lib/supabase";
-import { getIANATimezone, getUTCOffsetHours } from "@/lib/timezone";
-import { useGoogleCalendarAuth } from "@/lib/google-calendar";
-import {
-  requestNotificationPermissions,
-  areNotificationsEnabled,
-  setNotificationsEnabled as setNotificationsEnabledStorage,
-  getReminderMinutes,
-  setReminderMinutes,
-} from "@/lib/notifications";
-import { format } from "date-fns";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import DateTimePicker from "@react-native-community/datetimepicker";
-import { FeedbackCategory } from "@/lib/types";
 import ComprehensiveFeedbackModal from "@/components/ComprehensiveFeedbackModal";
 import HelpFAQModal from "@/components/HelpFAQModal";
-import * as StoreReview from "expo-store-review";
+import TourTooltip from "@/components/TourTooltip";
 import { useAuth } from "@/contexts/AuthContext";
-import { useThemeMode, useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
 import { useSubscription } from "@/contexts/SubscriptionContext";
-import TourTooltip from "@/components/TourTooltip";
+import { useAppColors, useThemeMode } from "@/contexts/ThemeContext";
+import { useGoogleCalendarAuth } from "@/lib/google-calendar";
+import {
+  areNotificationsEnabled,
+  getReminderMinutes,
+  requestNotificationPermissions,
+  setNotificationsEnabled as setNotificationsEnabledStorage,
+  setReminderMinutes,
+} from "@/lib/notifications";
+import { signOut, supabase } from "@/lib/supabase";
+import { getIANATimezone, getUTCOffsetHours } from "@/lib/timezone";
+import { FeedbackCategory } from "@/lib/types";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import DateTimePicker from "@react-native-community/datetimepicker";
+import { format } from "date-fns";
+import { router, useFocusEffect } from "expo-router";
+import * as StoreReview from "expo-store-review";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Alert,
+  Animated,
+  Linking,
+  Platform,
+  Pressable,
+  Modal as RNModal,
+  ScrollView,
+  StyleSheet,
+  View,
+} from "react-native";
+import {
+  ActivityIndicator,
+  Avatar,
+  Button,
+  Chip,
+  Divider,
+  List,
+  Modal,
+  Portal,
+  Switch,
+  Text,
+  TextInput,
+} from "react-native-paper";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 const COLORS = {
   primary: "#4A90E2",
@@ -61,64 +69,119 @@ const COLORS = {
   border: "#E5E7EB",
 };
 
-const CONFETTI_COLORS = ['#4A90E2', '#7C6FBF', '#5FBF73', '#F5A962', '#E25555', '#F472B6'];
+const CONFETTI_COLORS = [
+  "#4A90E2",
+  "#7C6FBF",
+  "#5FBF73",
+  "#F5A962",
+  "#E25555",
+  "#F472B6",
+];
 
-function SettingsItem({ onPress, style, ...props }: React.ComponentProps<typeof List.Item>) {
+function SettingsItem({
+  onPress,
+  style,
+  ...props
+}: React.ComponentProps<typeof List.Item>) {
   const [pressed, setPressed] = useState(false);
   if (!onPress) {
-    return <List.Item {...props} style={[{ backgroundColor: 'transparent' }, style]} />;
+    return (
+      <List.Item
+        {...props}
+        style={[{ backgroundColor: "transparent" }, style]}
+      />
+    );
   }
   return (
     <Pressable
       onPress={onPress}
       onPressIn={() => setPressed(true)}
       onPressOut={() => setPressed(false)}
-      style={{ backgroundColor: pressed ? `${COLORS.primary}18` : 'transparent' }}
+      style={{
+        backgroundColor: pressed ? `${COLORS.primary}18` : "transparent",
+      }}
     >
-      <List.Item {...props} style={[{ backgroundColor: 'transparent' }, style]} />
+      <List.Item
+        {...props}
+        style={[{ backgroundColor: "transparent" }, style]}
+      />
     </Pressable>
   );
 }
 
 function TourCompleteConfetti() {
-  const particles = useMemo(() =>
-    Array.from({ length: 40 }, (_, i) => ({
-      id: i,
-      color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
-      x: Math.random() * 380,
-      size: 6 + Math.random() * 8,
-      delay: i * 60,
-      duration: 1400 + Math.random() * 800,
-      translateY: new Animated.Value(-20),
-      opacity: new Animated.Value(0),
-    })), []);
+  const particles = useMemo(
+    () =>
+      Array.from({ length: 40 }, (_, i) => ({
+        id: i,
+        color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+        x: Math.random() * 380,
+        size: 6 + Math.random() * 8,
+        delay: i * 60,
+        duration: 1400 + Math.random() * 800,
+        translateY: new Animated.Value(-20),
+        opacity: new Animated.Value(0),
+      })),
+    [],
+  );
 
   useEffect(() => {
-    Animated.stagger(0, particles.map((p) =>
-      Animated.sequence([
-        Animated.delay(p.delay),
-        Animated.parallel([
-          Animated.timing(p.translateY, { toValue: 700, duration: p.duration, useNativeDriver: true }),
-          Animated.sequence([
-            Animated.timing(p.opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
-            Animated.delay(p.duration - 400),
-            Animated.timing(p.opacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+    Animated.stagger(
+      0,
+      particles.map((p) =>
+        Animated.sequence([
+          Animated.delay(p.delay),
+          Animated.parallel([
+            Animated.timing(p.translateY, {
+              toValue: 700,
+              duration: p.duration,
+              useNativeDriver: true,
+            }),
+            Animated.sequence([
+              Animated.timing(p.opacity, {
+                toValue: 1,
+                duration: 200,
+                useNativeDriver: true,
+              }),
+              Animated.delay(p.duration - 400),
+              Animated.timing(p.opacity, {
+                toValue: 0,
+                duration: 200,
+                useNativeDriver: true,
+              }),
+            ]),
           ]),
         ]),
-      ])
-    )).start();
+      ),
+    ).start();
   }, []);
 
   return (
-    <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
+    <View
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        pointerEvents: "none",
+      }}
+    >
       {particles.map((p) => (
-        <Animated.View key={p.id} style={{
-          position: 'absolute', left: p.x, top: 0,
-          width: p.size, height: p.size, borderRadius: p.size / 4,
-          backgroundColor: p.color,
-          transform: [{ translateY: p.translateY }],
-          opacity: p.opacity,
-        }} />
+        <Animated.View
+          key={p.id}
+          style={{
+            position: "absolute",
+            left: p.x,
+            top: 0,
+            width: p.size,
+            height: p.size,
+            borderRadius: p.size / 4,
+            backgroundColor: p.color,
+            transform: [{ translateY: p.translateY }],
+            opacity: p.opacity,
+          }}
+        />
       ))}
     </View>
   );
@@ -126,7 +189,10 @@ function TourCompleteConfetti() {
 
 export default function SettingsScreen() {
   const { tourStep, advanceTour, skipTour: _skipTour } = useGuidedTour();
-  const skipTour = useCallback(() => _skipTour(tourStep), [_skipTour, tourStep]);
+  const skipTour = useCallback(
+    () => _skipTour(tourStep),
+    [_skipTour, tourStep],
+  );
   const { isPro, isTrialing, trialDaysRemaining } = useSubscription();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [reminderTime, setReminderTime] = useState(15);
@@ -139,7 +205,9 @@ export default function SettingsScreen() {
   // Help & Feedback state
   const [helpFaqVisible, setHelpFaqVisible] = useState(false);
   const [feedbackModalVisible, setFeedbackModalVisible] = useState(false);
-  const [feedbackCategory, setFeedbackCategory] = useState<FeedbackCategory | undefined>(undefined);
+  const [feedbackCategory, setFeedbackCategory] = useState<
+    FeedbackCategory | undefined
+  >(undefined);
 
   // Work hours state
   const [workHoursModalVisible, setWorkHoursModalVisible] = useState(false);
@@ -148,17 +216,30 @@ export default function SettingsScreen() {
   const [savingWorkHours, setSavingWorkHours] = useState(false);
 
   // Auto-reschedule state (stored as total minutes from midnight)
-  const [autoRescheduleModalVisible, setAutoRescheduleModalVisible] = useState(false);
+  const [autoRescheduleModalVisible, setAutoRescheduleModalVisible] =
+    useState(false);
   const [autoRescheduleEnabled, setAutoRescheduleEnabled] = useState(true);
-  const [autoRescheduleMorning, setAutoRescheduleMorning] = useState(540);  // 9:00am
+  const [autoRescheduleMorning, setAutoRescheduleMorning] = useState(540); // 9:00am
   const [autoRescheduleEvening, setAutoRescheduleEvening] = useState(1140); // 7:00pm
   // Tracks the last successfully saved values so dismissing without saving doesn't corrupt display
-  const savedAutoRescheduleRef = useRef({ enabled: true, morning: 540, evening: 1140 });
+  const savedAutoRescheduleRef = useRef({
+    enabled: true,
+    morning: 540,
+    evening: 1140,
+  });
   const [savingAutoReschedule, setSavingAutoReschedule] = useState(false);
   const [showMorningPicker, setShowMorningPicker] = useState(false);
   const [showEveningPicker, setShowEveningPicker] = useState(false);
-  const [morningPickerDate, setMorningPickerDate] = useState(() => { const d = new Date(); d.setHours(9, 0, 0, 0); return d; });
-  const [eveningPickerDate, setEveningPickerDate] = useState(() => { const d = new Date(); d.setHours(19, 0, 0, 0); return d; });
+  const [morningPickerDate, setMorningPickerDate] = useState(() => {
+    const d = new Date();
+    d.setHours(9, 0, 0, 0);
+    return d;
+  });
+  const [eveningPickerDate, setEveningPickerDate] = useState(() => {
+    const d = new Date();
+    d.setHours(19, 0, 0, 0);
+    return d;
+  });
 
   // Reminder time modal
   const [reminderModalVisible, setReminderModalVisible] = useState(false);
@@ -190,9 +271,8 @@ export default function SettingsScreen() {
     useCallback(() => {
       loadProfile();
       loadNotificationSettings();
-    }, [])
+    }, []),
   );
-
 
   const loadNotificationSettings = async () => {
     try {
@@ -215,7 +295,7 @@ export default function SettingsScreen() {
         if (!granted) {
           Alert.alert(
             "Permission Required",
-            "Please enable notifications in your device settings to receive task reminders."
+            "Please enable notifications in your device settings to receive task reminders.",
           );
           return;
         }
@@ -239,7 +319,9 @@ export default function SettingsScreen() {
   const loadProfile = async () => {
     try {
       // Get auth user for email and metadata
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
       if (user?.email) {
         setEmail(user.email);
       }
@@ -247,7 +329,9 @@ export default function SettingsScreen() {
       // Get profile — select dedicated columns alongside personality_data
       const { data: profile } = await supabase
         .from("user_profiles")
-        .select("display_name, personality_data, auto_reschedule_enabled, auto_reschedule_morning, auto_reschedule_evening")
+        .select(
+          "display_name, personality_data, auto_reschedule_enabled, auto_reschedule_morning, auto_reschedule_evening",
+        )
         .single();
 
       // Load work hours from personality_data (still stored there)
@@ -267,12 +351,24 @@ export default function SettingsScreen() {
 
       setAutoRescheduleEnabled(savedEnabled);
       setAutoRescheduleMorning(savedMorning);
-      setMorningPickerDate(() => { const d = new Date(); d.setHours(Math.floor(savedMorning / 60), savedMorning % 60, 0, 0); return d; });
+      setMorningPickerDate(() => {
+        const d = new Date();
+        d.setHours(Math.floor(savedMorning / 60), savedMorning % 60, 0, 0);
+        return d;
+      });
       setAutoRescheduleEvening(savedEvening);
-      setEveningPickerDate(() => { const d = new Date(); d.setHours(Math.floor(savedEvening / 60), savedEvening % 60, 0, 0); return d; });
+      setEveningPickerDate(() => {
+        const d = new Date();
+        d.setHours(Math.floor(savedEvening / 60), savedEvening % 60, 0, 0);
+        return d;
+      });
 
       // Keep ref in sync with what's on disk so dismiss-without-save can restore
-      savedAutoRescheduleRef.current = { enabled: savedEnabled, morning: savedMorning, evening: savedEvening };
+      savedAutoRescheduleRef.current = {
+        enabled: savedEnabled,
+        morning: savedMorning,
+        evening: savedEvening,
+      };
 
       if (profile?.display_name) {
         setDisplayName(profile.display_name);
@@ -305,7 +401,9 @@ export default function SettingsScreen() {
   const handleSaveName = async () => {
     try {
       setSaving(true);
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
       const { error } = await supabase
         .from("user_profiles")
@@ -322,7 +420,6 @@ export default function SettingsScreen() {
       setSaving(false);
     }
   };
-
 
   const handleLogout = async () => {
     try {
@@ -342,7 +439,10 @@ export default function SettingsScreen() {
       await connectCalendar();
     } catch (error) {
       console.error("[Settings] Calendar connect error:", error);
-      Alert.alert("Connection Failed", "Unable to connect to Google Calendar. Please try again.");
+      Alert.alert(
+        "Connection Failed",
+        "Unable to connect to Google Calendar. Please try again.",
+      );
     }
   };
 
@@ -373,7 +473,7 @@ export default function SettingsScreen() {
             }
           },
         },
-      ]
+      ],
     );
   };
 
@@ -390,7 +490,9 @@ export default function SettingsScreen() {
   const handleSaveWorkHours = async () => {
     try {
       setSavingWorkHours(true);
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
       // Get current personality_data
       const { data: profile } = await supabase
@@ -434,7 +536,9 @@ export default function SettingsScreen() {
   const handleSaveAutoReschedule = async () => {
     try {
       setSavingAutoReschedule(true);
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
       const { error } = await supabase
         .from("user_profiles")
@@ -451,11 +555,18 @@ export default function SettingsScreen() {
       // Mark intro as seen — user has made an explicit choice via Settings
       await AsyncStorage.setItem("autoRescheduleIntroSeen", "true");
       // Keep ref in sync so dismiss-without-save can restore correctly
-      savedAutoRescheduleRef.current = { enabled: autoRescheduleEnabled, morning: autoRescheduleMorning, evening: autoRescheduleEvening };
+      savedAutoRescheduleRef.current = {
+        enabled: autoRescheduleEnabled,
+        morning: autoRescheduleMorning,
+        evening: autoRescheduleEvening,
+      };
       setAutoRescheduleModalVisible(false);
     } catch (error) {
       console.error("[Settings] Error saving auto-reschedule settings:", error);
-      Alert.alert("Save Failed", "Couldn't save auto-reschedule settings. Please try again.");
+      Alert.alert(
+        "Save Failed",
+        "Couldn't save auto-reschedule settings. Please try again.",
+      );
     } finally {
       setSavingAutoReschedule(false);
     }
@@ -475,7 +586,6 @@ export default function SettingsScreen() {
     return `${displayH}:${m.toString().padStart(2, "0")} ${period}`;
   };
 
-
   // Get initials for avatar
   const getInitials = () => {
     if (!displayName) return "?";
@@ -488,22 +598,47 @@ export default function SettingsScreen() {
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: appColors.background }]}>
-      <View style={[styles.header, { backgroundColor: appColors.surface, borderBottomColor: appColors.border }]}>
-        <Text variant="headlineMedium" style={[styles.title, { color: appColors.textPrimary }]}>
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: appColors.background }]}
+    >
+      <View
+        style={[
+          styles.header,
+          {
+            backgroundColor: appColors.surface,
+            borderBottomColor: appColors.border,
+          },
+        ]}
+      >
+        <Text
+          variant="headlineMedium"
+          style={[styles.title, { color: appColors.textPrimary }]}
+        >
           Settings
         </Text>
       </View>
 
       <ScrollView style={styles.content}>
         {/* Profile Card */}
-        <View style={[styles.profileCard, { backgroundColor: appColors.surface }]}>
-          <Avatar.Text size={64} label={getInitials()} style={[styles.avatar, { backgroundColor: appColors.primary }]} />
+        <View
+          style={[styles.profileCard, { backgroundColor: appColors.surface }]}
+        >
+          <Avatar.Text
+            size={64}
+            label={getInitials()}
+            style={[styles.avatar, { backgroundColor: appColors.primary }]}
+          />
           <View style={styles.profileInfo}>
-            <Text variant="titleLarge" style={[styles.profileName, { color: appColors.textPrimary }]}>
+            <Text
+              variant="titleLarge"
+              style={[styles.profileName, { color: appColors.textPrimary }]}
+            >
               {displayName || "Loading..."}
             </Text>
-            <Text variant="bodyMedium" style={[styles.profileEmail, { color: appColors.textSecondary }]}>
+            <Text
+              variant="bodyMedium"
+              style={[styles.profileEmail, { color: appColors.textSecondary }]}
+            >
               {email}
             </Text>
           </View>
@@ -513,8 +648,16 @@ export default function SettingsScreen() {
           <List.Subheader>Account</List.Subheader>
           <SettingsItem
             title="Account & Subscription"
-            description={isTrialing ? `Pro Trial · ${trialDaysRemaining}d left` : isPro ? "Pro" : "Free plan"}
-            left={(props) => <List.Icon {...props} icon="account-circle-outline" />}
+            description={
+              isTrialing
+                ? `Pro Trial · ${trialDaysRemaining}d left`
+                : isPro
+                  ? "Pro"
+                  : "Free plan"
+            }
+            left={(props) => (
+              <List.Icon {...props} icon="account-circle-outline" />
+            )}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => router.push("/settings/account")}
           />
@@ -542,8 +685,16 @@ export default function SettingsScreen() {
           {isAdmin && (
             <SettingsItem
               title="Admin Dashboard"
-              description={role === "super_admin" ? "Super Admin access" : "Admin access"}
-              left={(props) => <List.Icon {...props} icon="shield-crown" color={appColors.secondary} />}
+              description={
+                role === "super_admin" ? "Super Admin access" : "Admin access"
+              }
+              left={(props) => (
+                <List.Icon
+                  {...props}
+                  icon="shield-crown"
+                  color={appColors.secondary}
+                />
+              )}
               right={(props) => <List.Icon {...props} icon="chevron-right" />}
               onPress={() => router.push("/admin")}
               titleStyle={{ color: appColors.secondary }}
@@ -584,31 +735,79 @@ export default function SettingsScreen() {
           />
           <SettingsItem
             title="Auto-Reschedule"
-            description={!isPro
-              ? "Pro feature • Upgrade to unlock"
-              : autoRescheduleEnabled
-                ? `${formatTimeFromMinutes(autoRescheduleMorning)} and ${formatTimeFromMinutes(autoRescheduleEvening)}`
-                : "Disabled"}
+            description={
+              !isPro
+                ? "Pro feature • Upgrade to unlock"
+                : autoRescheduleEnabled
+                  ? `${formatTimeFromMinutes(autoRescheduleMorning)} and ${formatTimeFromMinutes(autoRescheduleEvening)}`
+                  : "Disabled"
+            }
             left={(props) => <List.Icon {...props} icon="clock-edit-outline" />}
             right={(props) => (
-              <List.Icon {...props} icon={isPro ? "chevron-right" : "lock-outline"} />
+              <List.Icon
+                {...props}
+                icon={isPro ? "chevron-right" : "lock-outline"}
+              />
             )}
-            onPress={() => isPro ? setAutoRescheduleModalVisible(true) : router.push({ pathname: "/paywall", params: { source: "auto_reschedule" } })}
+            onPress={() =>
+              isPro
+                ? setAutoRescheduleModalVisible(true)
+                : router.push({
+                    pathname: "/paywall",
+                    params: { source: "auto_reschedule" },
+                  })
+            }
           />
           <SettingsItem
             title="Appearance"
-            description={themeMode === 'system' ? 'System default' : themeMode === 'dark' ? 'Dark mode' : 'Light mode'}
-            left={(props) => <List.Icon {...props} icon={themeMode === 'dark' ? 'weather-night' : themeMode === 'system' ? 'theme-light-dark' : 'white-balance-sunny'} />}
+            description={
+              themeMode === "system"
+                ? "System default"
+                : themeMode === "dark"
+                  ? "Dark mode"
+                  : "Light mode"
+            }
+            left={(props) => (
+              <List.Icon
+                {...props}
+                icon={
+                  themeMode === "dark"
+                    ? "weather-night"
+                    : themeMode === "system"
+                      ? "theme-light-dark"
+                      : "white-balance-sunny"
+                }
+              />
+            )}
             right={() => (
-              <View style={[styles.themeToggleRow, { backgroundColor: appColors.chipBg }]}>
-                {(['light', 'system', 'dark'] as const).map((m) => (
+              <View
+                style={[
+                  styles.themeToggleRow,
+                  { backgroundColor: appColors.chipBg },
+                ]}
+              >
+                {(["light", "system", "dark"] as const).map((m) => (
                   <Pressable
                     key={m}
-                    style={[styles.themeToggleChip, themeMode === m && [styles.themeToggleChipActive, { backgroundColor: appColors.primary }]]}
+                    style={[
+                      styles.themeToggleChip,
+                      themeMode === m && [
+                        styles.themeToggleChipActive,
+                        { backgroundColor: appColors.primary },
+                      ],
+                    ]}
                     onPress={() => setThemeMode(m)}
                   >
-                    <Text style={[styles.themeToggleText, { color: appColors.textSecondary }, themeMode === m && styles.themeToggleTextActive]}>
-                      {m === 'system' ? 'Auto' : m.charAt(0).toUpperCase() + m.slice(1)}
+                    <Text
+                      style={[
+                        styles.themeToggleText,
+                        { color: appColors.textSecondary },
+                        themeMode === m && styles.themeToggleTextActive,
+                      ]}
+                    >
+                      {m === "system"
+                        ? "Auto"
+                        : m.charAt(0).toUpperCase() + m.slice(1)}
                     </Text>
                   </Pressable>
                 ))}
@@ -617,7 +816,13 @@ export default function SettingsScreen() {
           />
           <SettingsItem
             title="Default Task Duration"
-            description={defaultDuration < 60 ? `${defaultDuration} minutes` : defaultDuration === 60 ? "1 hour" : `${defaultDuration / 60} hours`}
+            description={
+              defaultDuration < 60
+                ? `${defaultDuration} minutes`
+                : defaultDuration === 60
+                  ? "1 hour"
+                  : `${defaultDuration / 60} hours`
+            }
             left={(props) => <List.Icon {...props} icon="timer" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => setDurationModalVisible(true)}
@@ -636,10 +841,10 @@ export default function SettingsScreen() {
                   isCalendarLoading
                     ? "Loading..."
                     : isCalendarConnected
-                    ? lastSyncTime
-                      ? `Last synced ${format(lastSyncTime, "MMM d 'at' h:mm a")}`
-                      : "Connected"
-                    : "Not connected"
+                      ? lastSyncTime
+                        ? `Last synced ${format(lastSyncTime, "MMM d 'at' h:mm a")}`
+                        : "Connected"
+                      : "Not connected"
                 }
                 left={(props) => <List.Icon {...props} icon="google" />}
                 right={() => (
@@ -649,8 +854,14 @@ export default function SettingsScreen() {
                     ) : isCalendarConnected ? (
                       <Chip
                         mode="flat"
-                        textStyle={[styles.connectedChipText, { color: appColors.success }]}
-                        style={[styles.connectedChip, { backgroundColor: appColors.successLight }]}
+                        textStyle={[
+                          styles.connectedChipText,
+                          { color: appColors.success },
+                        ]}
+                        style={[
+                          styles.connectedChip,
+                          { backgroundColor: appColors.successLight },
+                        ]}
                       >
                         Connected
                       </Chip>
@@ -675,7 +886,10 @@ export default function SettingsScreen() {
                     left={(props) => <List.Icon {...props} icon="sync" />}
                     right={() =>
                       isCalendarLoading ? (
-                        <ActivityIndicator size="small" style={{ marginRight: 16 }} />
+                        <ActivityIndicator
+                          size="small"
+                          style={{ marginRight: 16 }}
+                        />
                       ) : null
                     }
                     onPress={handleSyncCalendar}
@@ -686,7 +900,10 @@ export default function SettingsScreen() {
                     description="Remove Google Calendar sync"
                     left={(props) => <List.Icon {...props} icon="link-off" />}
                     onPress={handleDisconnectCalendar}
-                    titleStyle={[styles.disconnectText, { color: appColors.error }]}
+                    titleStyle={[
+                      styles.disconnectText,
+                      { color: appColors.error },
+                    ]}
                   />
                 </>
               )}
@@ -697,11 +914,17 @@ export default function SettingsScreen() {
               description="Sync your calendar events"
               left={(props) => <List.Icon {...props} icon="google" />}
               right={() => (
-                <View style={{ alignSelf: 'center', marginRight: 8 }}>
+                <View style={{ alignSelf: "center", marginRight: 8 }}>
                   <Chip
                     mode="flat"
-                    textStyle={[styles.comingSoonChipText, { color: appColors.textTertiary }]}
-                    style={[styles.comingSoonChip, { backgroundColor: `${appColors.textTertiary}15` }]}
+                    textStyle={[
+                      styles.comingSoonChipText,
+                      { color: appColors.textTertiary },
+                    ]}
+                    style={[
+                      styles.comingSoonChip,
+                      { backgroundColor: `${appColors.textTertiary}15` },
+                    ]}
                   >
                     Coming Soon
                   </Chip>
@@ -718,14 +941,18 @@ export default function SettingsScreen() {
           <SettingsItem
             title="Help & FAQ"
             description="How scheduling works, task states, and more"
-            left={(props) => <List.Icon {...props} icon="help-circle-outline" />}
+            left={(props) => (
+              <List.Icon {...props} icon="help-circle-outline" />
+            )}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => setHelpFaqVisible(true)}
           />
           <SettingsItem
             title="Send Feedback"
             description="Share your thoughts"
-            left={(props) => <List.Icon {...props} icon="comment-text-outline" />}
+            left={(props) => (
+              <List.Icon {...props} icon="comment-text-outline" />
+            )}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => setFeedbackModalVisible(true)}
           />
@@ -735,7 +962,7 @@ export default function SettingsScreen() {
             left={(props) => <List.Icon {...props} icon="lightbulb-outline" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => {
-              setFeedbackCategory('missing_feature');
+              setFeedbackCategory("missing_feature");
               setFeedbackModalVisible(true);
             }}
           />
@@ -745,7 +972,7 @@ export default function SettingsScreen() {
             left={(props) => <List.Icon {...props} icon="bug-outline" />}
             right={(props) => <List.Icon {...props} icon="chevron-right" />}
             onPress={() => {
-              setFeedbackCategory('bug');
+              setFeedbackCategory("bug");
               setFeedbackModalVisible(true);
             }}
           />
@@ -769,10 +996,13 @@ export default function SettingsScreen() {
                 await Linking.openURL(
                   canOpen
                     ? marketUrl
-                    : "https://play.google.com/store/apps/details?id=com.adam.daywise"
+                    : "https://play.google.com/store/apps/details?id=com.adam.daywise",
                 );
               } catch (e) {
-                Alert.alert("Couldn't open Play Store", "Search for DayWise on the Play Store to leave a review.");
+                Alert.alert(
+                  "Couldn't open Play Store",
+                  "Search for DayWise on the Play Store to leave a review.",
+                );
               }
             }}
           />
@@ -784,7 +1014,7 @@ export default function SettingsScreen() {
           <List.Subheader>About</List.Subheader>
           <SettingsItem
             title="Version"
-            description="1.0.0 (MVP)"
+            description="1.1.1"
             left={(props) => <List.Icon {...props} icon="information" />}
           />
           <SettingsItem
@@ -804,15 +1034,34 @@ export default function SettingsScreen() {
         <Divider />
 
         <List.Section>
-          <List.Subheader style={[styles.dangerHeader, { color: appColors.error }]}>Danger Zone</List.Subheader>
+          <List.Subheader
+            style={[styles.dangerHeader, { color: appColors.error }]}
+          >
+            Danger Zone
+          </List.Subheader>
           <SettingsItem
             title="Delete Account"
             description="Permanently delete your account and all data"
-            left={(props) => <List.Icon {...props} icon="delete-forever" color={appColors.error} />}
-            right={(props) => <List.Icon {...props} icon="chevron-right" color={appColors.error} />}
+            left={(props) => (
+              <List.Icon
+                {...props}
+                icon="delete-forever"
+                color={appColors.error}
+              />
+            )}
+            right={(props) => (
+              <List.Icon
+                {...props}
+                icon="chevron-right"
+                color={appColors.error}
+              />
+            )}
             onPress={handleDeleteAccount}
             titleStyle={[styles.deleteAccountText, { color: appColors.error }]}
-            descriptionStyle={[styles.deleteAccountDescription, { color: appColors.error }]}
+            descriptionStyle={[
+              styles.deleteAccountDescription,
+              { color: appColors.error },
+            ]}
           />
         </List.Section>
 
@@ -834,9 +1083,15 @@ export default function SettingsScreen() {
         <Modal
           visible={editModalVisible}
           onDismiss={() => setEditModalVisible(false)}
-          contentContainerStyle={[styles.modalContainer, { backgroundColor: appColors.surface }]}
+          contentContainerStyle={[
+            styles.modalContainer,
+            { backgroundColor: appColors.surface },
+          ]}
         >
-          <Text variant="titleLarge" style={[styles.modalTitle, { color: appColors.textPrimary }]}>
+          <Text
+            variant="titleLarge"
+            style={[styles.modalTitle, { color: appColors.textPrimary }]}
+          >
             Edit Display Name
           </Text>
           <TextInput
@@ -873,13 +1128,23 @@ export default function SettingsScreen() {
         <Modal
           visible={workHoursModalVisible}
           onDismiss={() => setWorkHoursModalVisible(false)}
-          contentContainerStyle={[styles.modalContainer, { backgroundColor: appColors.surface }]}
+          contentContainerStyle={[
+            styles.modalContainer,
+            { backgroundColor: appColors.surface },
+          ]}
         >
-          <Text variant="titleLarge" style={[styles.modalTitle, { color: appColors.textPrimary }]}>
+          <Text
+            variant="titleLarge"
+            style={[styles.modalTitle, { color: appColors.textPrimary }]}
+          >
             Set Work Hours
           </Text>
-          <Text variant="bodyMedium" style={[styles.workHoursHint, { color: appColors.textSecondary }]}>
-            The scheduler will prefer times within these hours, but you can still manually pick any time.
+          <Text
+            variant="bodyMedium"
+            style={[styles.workHoursHint, { color: appColors.textSecondary }]}
+          >
+            The scheduler will prefer times within these hours, but you can
+            still manually pick any time.
           </Text>
 
           <View style={styles.workHoursRow}>
@@ -898,7 +1163,9 @@ export default function SettingsScreen() {
               <Button
                 mode="outlined"
                 compact
-                onPress={() => setWorkStartHour(Math.min(23, workStartHour + 1))}
+                onPress={() =>
+                  setWorkStartHour(Math.min(23, workStartHour + 1))
+                }
               >
                 +
               </Button>
@@ -911,7 +1178,9 @@ export default function SettingsScreen() {
               <Button
                 mode="outlined"
                 compact
-                onPress={() => setWorkEndHour(Math.max(workStartHour + 1, workEndHour - 1))}
+                onPress={() =>
+                  setWorkEndHour(Math.max(workStartHour + 1, workEndHour - 1))
+                }
               >
                 -
               </Button>
@@ -958,38 +1227,81 @@ export default function SettingsScreen() {
             const s = savedAutoRescheduleRef.current;
             setAutoRescheduleEnabled(s.enabled);
             setAutoRescheduleMorning(s.morning);
-            setMorningPickerDate(() => { const d = new Date(); d.setHours(Math.floor(s.morning / 60), s.morning % 60, 0, 0); return d; });
+            setMorningPickerDate(() => {
+              const d = new Date();
+              d.setHours(Math.floor(s.morning / 60), s.morning % 60, 0, 0);
+              return d;
+            });
             setAutoRescheduleEvening(s.evening);
-            setEveningPickerDate(() => { const d = new Date(); d.setHours(Math.floor(s.evening / 60), s.evening % 60, 0, 0); return d; });
+            setEveningPickerDate(() => {
+              const d = new Date();
+              d.setHours(Math.floor(s.evening / 60), s.evening % 60, 0, 0);
+              return d;
+            });
             setShowMorningPicker(false);
             setShowEveningPicker(false);
             setAutoRescheduleModalVisible(false);
           }}
-          contentContainerStyle={[styles.modalContainer, { backgroundColor: appColors.surface }]}
+          contentContainerStyle={[
+            styles.modalContainer,
+            { backgroundColor: appColors.surface },
+          ]}
         >
-          <Text variant="titleLarge" style={[styles.modalTitle, { color: appColors.textPrimary }]}>
+          <Text
+            variant="titleLarge"
+            style={[styles.modalTitle, { color: appColors.textPrimary }]}
+          >
             Auto-Reschedule
           </Text>
-          <Text variant="bodyMedium" style={[styles.workHoursHint, { color: appColors.textSecondary }]}>
-            Missed tasks are automatically rescheduled twice a day at your chosen times.
+          <Text
+            variant="bodyMedium"
+            style={[styles.workHoursHint, { color: appColors.textSecondary }]}
+          >
+            Missed tasks are automatically rescheduled twice a day at your
+            chosen times.
           </Text>
 
           <View style={[styles.workHoursRow, { marginBottom: 20 }]}>
-            <Text variant="bodyLarge" style={{ color: appColors.textPrimary }}>Enabled</Text>
-            <Switch value={autoRescheduleEnabled} onValueChange={setAutoRescheduleEnabled} />
+            <Text variant="bodyLarge" style={{ color: appColors.textPrimary }}>
+              Enabled
+            </Text>
+            <Switch
+              value={autoRescheduleEnabled}
+              onValueChange={setAutoRescheduleEnabled}
+            />
           </View>
 
           {autoRescheduleEnabled && (
             <>
               {/* Morning */}
               <View style={[styles.workHoursRow, { marginBottom: 4 }]}>
-                <Text variant="bodyLarge" style={{ color: appColors.textPrimary }}>Morning</Text>
-                <Pressable
-                  onPress={() => { setShowEveningPicker(false); setShowMorningPicker(true); }}
-                  style={[styles.timeDisplayButton, { backgroundColor: appColors.chipBg }]}
+                <Text
+                  variant="bodyLarge"
+                  style={{ color: appColors.textPrimary }}
                 >
-                  <MaterialCommunityIcons name="clock-outline" size={15} color={appColors.primary} />
-                  <Text style={[styles.timeDisplayText, { color: appColors.primary }]}>
+                  Morning
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    setShowEveningPicker(false);
+                    setShowMorningPicker(true);
+                  }}
+                  style={[
+                    styles.timeDisplayButton,
+                    { backgroundColor: appColors.chipBg },
+                  ]}
+                >
+                  <MaterialCommunityIcons
+                    name="clock-outline"
+                    size={15}
+                    color={appColors.primary}
+                  />
+                  <Text
+                    style={[
+                      styles.timeDisplayText,
+                      { color: appColors.primary },
+                    ]}
+                  >
                     {formatTimeFromMinutes(autoRescheduleMorning)}
                   </Text>
                 </Pressable>
@@ -1003,21 +1315,48 @@ export default function SettingsScreen() {
                     if (Platform.OS !== "ios") setShowMorningPicker(false);
                     if (date) {
                       setMorningPickerDate(date);
-                      setAutoRescheduleMorning(date.getHours() * 60 + date.getMinutes());
+                      setAutoRescheduleMorning(
+                        date.getHours() * 60 + date.getMinutes(),
+                      );
                     }
                   }}
                 />
               )}
 
               {/* Evening */}
-              <View style={[styles.workHoursRow, { marginTop: 12, marginBottom: 4 }]}>
-                <Text variant="bodyLarge" style={{ color: appColors.textPrimary }}>Evening</Text>
-                <Pressable
-                  onPress={() => { setShowMorningPicker(false); setShowEveningPicker(true); }}
-                  style={[styles.timeDisplayButton, { backgroundColor: appColors.chipBg }]}
+              <View
+                style={[
+                  styles.workHoursRow,
+                  { marginTop: 12, marginBottom: 4 },
+                ]}
+              >
+                <Text
+                  variant="bodyLarge"
+                  style={{ color: appColors.textPrimary }}
                 >
-                  <MaterialCommunityIcons name="clock-outline" size={15} color={appColors.primary} />
-                  <Text style={[styles.timeDisplayText, { color: appColors.primary }]}>
+                  Evening
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    setShowMorningPicker(false);
+                    setShowEveningPicker(true);
+                  }}
+                  style={[
+                    styles.timeDisplayButton,
+                    { backgroundColor: appColors.chipBg },
+                  ]}
+                >
+                  <MaterialCommunityIcons
+                    name="clock-outline"
+                    size={15}
+                    color={appColors.primary}
+                  />
+                  <Text
+                    style={[
+                      styles.timeDisplayText,
+                      { color: appColors.primary },
+                    ]}
+                  >
                     {formatTimeFromMinutes(autoRescheduleEvening)}
                   </Text>
                 </Pressable>
@@ -1031,7 +1370,9 @@ export default function SettingsScreen() {
                     if (Platform.OS !== "ios") setShowEveningPicker(false);
                     if (date) {
                       setEveningPickerDate(date);
-                      setAutoRescheduleEvening(date.getHours() * 60 + date.getMinutes());
+                      setAutoRescheduleEvening(
+                        date.getHours() * 60 + date.getMinutes(),
+                      );
                     }
                   }}
                 />
@@ -1040,7 +1381,11 @@ export default function SettingsScreen() {
           )}
 
           <View style={styles.modalButtons}>
-            <Button mode="outlined" onPress={() => setAutoRescheduleModalVisible(false)} style={styles.modalButton}>
+            <Button
+              mode="outlined"
+              onPress={() => setAutoRescheduleModalVisible(false)}
+              style={styles.modalButton}
+            >
               Cancel
             </Button>
             <Button
@@ -1061,12 +1406,21 @@ export default function SettingsScreen() {
         <Modal
           visible={reminderModalVisible}
           onDismiss={() => setReminderModalVisible(false)}
-          contentContainerStyle={[styles.modalContainer, { backgroundColor: appColors.surface }]}
+          contentContainerStyle={[
+            styles.modalContainer,
+            { backgroundColor: appColors.surface },
+          ]}
         >
-          <Text variant="titleLarge" style={[styles.modalTitle, { color: appColors.textPrimary }]}>
+          <Text
+            variant="titleLarge"
+            style={[styles.modalTitle, { color: appColors.textPrimary }]}
+          >
             Reminder Time
           </Text>
-          <Text variant="bodyMedium" style={[styles.workHoursHint, { color: appColors.textSecondary }]}>
+          <Text
+            variant="bodyMedium"
+            style={[styles.workHoursHint, { color: appColors.textSecondary }]}
+          >
             How many minutes before a task should you be reminded?
           </Text>
 
@@ -1076,8 +1430,17 @@ export default function SettingsScreen() {
                 key={minutes}
                 style={[
                   styles.reminderOption,
-                  { borderColor: appColors.border, backgroundColor: appColors.surface },
-                  reminderTime === minutes && [styles.reminderOptionSelected, { borderColor: appColors.primary, backgroundColor: appColors.primaryLight }],
+                  {
+                    borderColor: appColors.border,
+                    backgroundColor: appColors.surface,
+                  },
+                  reminderTime === minutes && [
+                    styles.reminderOptionSelected,
+                    {
+                      borderColor: appColors.primary,
+                      backgroundColor: appColors.primaryLight,
+                    },
+                  ],
                 ]}
                 onPress={() => setReminderTime(minutes)}
               >
@@ -1085,7 +1448,10 @@ export default function SettingsScreen() {
                   style={[
                     styles.reminderOptionText,
                     { color: appColors.textSecondary },
-                    reminderTime === minutes && [styles.reminderOptionTextSelected, { color: appColors.primary }],
+                    reminderTime === minutes && [
+                      styles.reminderOptionTextSelected,
+                      { color: appColors.primary },
+                    ],
                   ]}
                 >
                   {minutes < 60 ? `${minutes} min` : "1 hour"}
@@ -1118,12 +1484,21 @@ export default function SettingsScreen() {
         <Modal
           visible={durationModalVisible}
           onDismiss={() => setDurationModalVisible(false)}
-          contentContainerStyle={[styles.modalContainer, { backgroundColor: appColors.surface }]}
+          contentContainerStyle={[
+            styles.modalContainer,
+            { backgroundColor: appColors.surface },
+          ]}
         >
-          <Text variant="titleLarge" style={[styles.modalTitle, { color: appColors.textPrimary }]}>
+          <Text
+            variant="titleLarge"
+            style={[styles.modalTitle, { color: appColors.textPrimary }]}
+          >
             Default Task Duration
           </Text>
-          <Text variant="bodyMedium" style={[styles.workHoursHint, { color: appColors.textSecondary }]}>
+          <Text
+            variant="bodyMedium"
+            style={[styles.workHoursHint, { color: appColors.textSecondary }]}
+          >
             Used when creating a new task. You can always change it per task.
           </Text>
           <View style={styles.reminderOptions}>
@@ -1132,29 +1507,54 @@ export default function SettingsScreen() {
                 key={mins}
                 style={[
                   styles.reminderOption,
-                  { borderColor: appColors.border, backgroundColor: appColors.surface },
-                  defaultDuration === mins && [styles.reminderOptionSelected, { borderColor: appColors.primary, backgroundColor: appColors.primaryLight }],
+                  {
+                    borderColor: appColors.border,
+                    backgroundColor: appColors.surface,
+                  },
+                  defaultDuration === mins && [
+                    styles.reminderOptionSelected,
+                    {
+                      borderColor: appColors.primary,
+                      backgroundColor: appColors.primaryLight,
+                    },
+                  ],
                 ]}
                 onPress={() => setDefaultDuration(mins)}
               >
-                <Text style={[
-                  styles.reminderOptionText,
-                  { color: appColors.textSecondary },
-                  defaultDuration === mins && [styles.reminderOptionTextSelected, { color: appColors.primary }],
-                ]}>
-                  {mins < 60 ? `${mins}m` : mins === 60 ? "1h" : `${mins / 60}h`}
+                <Text
+                  style={[
+                    styles.reminderOptionText,
+                    { color: appColors.textSecondary },
+                    defaultDuration === mins && [
+                      styles.reminderOptionTextSelected,
+                      { color: appColors.primary },
+                    ],
+                  ]}
+                >
+                  {mins < 60
+                    ? `${mins}m`
+                    : mins === 60
+                      ? "1h"
+                      : `${mins / 60}h`}
                 </Text>
               </Pressable>
             ))}
           </View>
           <View style={styles.modalButtons}>
-            <Button mode="outlined" onPress={() => setDurationModalVisible(false)} style={styles.modalButton}>
+            <Button
+              mode="outlined"
+              onPress={() => setDurationModalVisible(false)}
+              style={styles.modalButton}
+            >
               Cancel
             </Button>
             <Button
               mode="contained"
               onPress={async () => {
-                await AsyncStorage.setItem("defaultTaskDuration", String(defaultDuration));
+                await AsyncStorage.setItem(
+                  "defaultTaskDuration",
+                  String(defaultDuration),
+                );
                 setDurationModalVisible(false);
               }}
               style={styles.modalButton}
@@ -1203,48 +1603,111 @@ export default function SettingsScreen() {
       >
         <View style={tourCompleteStyles.overlay}>
           <TourCompleteConfetti />
-          <View style={[tourCompleteStyles.card, { backgroundColor: appColors.surface }]}>
-
+          <View
+            style={[
+              tourCompleteStyles.card,
+              { backgroundColor: appColors.surface },
+            ]}
+          >
             {/* Top accent bar */}
-            <View style={[tourCompleteStyles.accentBar, { backgroundColor: appColors.primary }]} />
+            <View
+              style={[
+                tourCompleteStyles.accentBar,
+                { backgroundColor: appColors.primary },
+              ]}
+            />
 
             <View style={tourCompleteStyles.body}>
               {/* Emoji in a tinted circle */}
-              <View style={[tourCompleteStyles.emojiCircle, { backgroundColor: `${appColors.primary}15` }]}>
+              <View
+                style={[
+                  tourCompleteStyles.emojiCircle,
+                  { backgroundColor: `${appColors.primary}15` },
+                ]}
+              >
                 <Text style={tourCompleteStyles.emoji}>🎉</Text>
               </View>
 
-              <Text style={[tourCompleteStyles.headline, { color: appColors.textPrimary }]}>
+              <Text
+                style={[
+                  tourCompleteStyles.headline,
+                  { color: appColors.textPrimary },
+                ]}
+              >
                 You're all set!
               </Text>
-              <Text style={[tourCompleteStyles.sub, { color: appColors.textSecondary }]}>
+              <Text
+                style={[
+                  tourCompleteStyles.sub,
+                  { color: appColors.textSecondary },
+                ]}
+              >
                 You've seen everything DayWise can do. Now it's your turn.
               </Text>
 
               {/* Tips */}
-              <View style={[tourCompleteStyles.tipsCard, { backgroundColor: appColors.background, borderColor: appColors.border }]}>
+              <View
+                style={[
+                  tourCompleteStyles.tipsCard,
+                  {
+                    backgroundColor: appColors.background,
+                    borderColor: appColors.border,
+                  },
+                ]}
+              >
                 {[
-                  { icon: "calendar-refresh", text: "Overdue? Tap Reschedule All to sort them fast." },
-                  { icon: "clock-alert-outline", text: "Missed a slot? Auto-reschedule handles it." },
-                  { icon: "gesture-tap-hold", text: "Long press tasks to bulk complete or delete." },
-                  { icon: "plus-circle-outline", text: "The + button is your quick-add shortcut." },
+                  {
+                    icon: "calendar-refresh",
+                    text: "Overdue? Tap Reschedule All to sort them fast.",
+                  },
+                  {
+                    icon: "clock-alert-outline",
+                    text: "Missed a slot? Auto-reschedule handles it.",
+                  },
+                  {
+                    icon: "gesture-tap-hold",
+                    text: "Long press tasks to bulk complete or delete.",
+                  },
+                  {
+                    icon: "plus-circle-outline",
+                    text: "The + button is your quick-add shortcut.",
+                  },
                 ].map((tip, i) => (
                   <View key={i} style={tourCompleteStyles.tipRow}>
-                    <MaterialCommunityIcons name={tip.icon as any} size={16} color={appColors.primary} />
-                    <Text style={[tourCompleteStyles.tipText, { color: appColors.textSecondary }]}>{tip.text}</Text>
+                    <MaterialCommunityIcons
+                      name={tip.icon as any}
+                      size={16}
+                      color={appColors.primary}
+                    />
+                    <Text
+                      style={[
+                        tourCompleteStyles.tipText,
+                        { color: appColors.textSecondary },
+                      ]}
+                    >
+                      {tip.text}
+                    </Text>
                   </View>
                 ))}
               </View>
 
               <Pressable
-                style={[tourCompleteStyles.ctaButton, { backgroundColor: appColors.primary }]}
+                style={[
+                  tourCompleteStyles.ctaButton,
+                  { backgroundColor: appColors.primary },
+                ]}
                 onPress={async () => {
                   await advanceTour(null);
                   router.push("/(tabs)/home");
                 }}
               >
                 <Text style={tourCompleteStyles.ctaLabel}>Let's go!</Text>
-                <MaterialCommunityIcons name="rocket-launch-outline" size={18} color="#FFFFFF" style={{ marginLeft: 6 }} />
+                <MaterialCommunityIcons
+                  name="rocket-launch-outline"
+                  size={18}
+                  color="#FFFFFF"
+                  style={{ marginLeft: 6 }}
+                />
               </Pressable>
             </View>
           </View>
@@ -1434,16 +1897,16 @@ const styles = StyleSheet.create({
 const tourCompleteStyles = StyleSheet.create({
   overlay: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     padding: 24,
-    backgroundColor: 'rgba(0,0,0,0.65)',
+    backgroundColor: "rgba(0,0,0,0.65)",
   },
   card: {
     borderRadius: 24,
-    width: '100%',
+    width: "100%",
     maxWidth: 360,
-    overflow: 'hidden',
+    overflow: "hidden",
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.18,
     shadowRadius: 24,
@@ -1451,10 +1914,10 @@ const tourCompleteStyles = StyleSheet.create({
   },
   accentBar: {
     height: 4,
-    alignSelf: 'stretch',
+    alignSelf: "stretch",
   },
   body: {
-    alignItems: 'center',
+    alignItems: "center",
     paddingHorizontal: 24,
     paddingTop: 24,
     paddingBottom: 28,
@@ -1463,8 +1926,8 @@ const tourCompleteStyles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     marginBottom: 16,
   },
   emoji: {
@@ -1472,19 +1935,19 @@ const tourCompleteStyles = StyleSheet.create({
   },
   headline: {
     fontSize: 24,
-    fontWeight: '800',
-    textAlign: 'center',
+    fontWeight: "800",
+    textAlign: "center",
     marginBottom: 8,
     letterSpacing: -0.3,
   },
   sub: {
     fontSize: 14,
-    textAlign: 'center',
+    textAlign: "center",
     lineHeight: 21,
     marginBottom: 20,
   },
   tipsCard: {
-    alignSelf: 'stretch',
+    alignSelf: "stretch",
     borderRadius: 14,
     borderWidth: 1,
     padding: 14,
@@ -1492,8 +1955,8 @@ const tourCompleteStyles = StyleSheet.create({
     marginBottom: 24,
   },
   tipRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+    flexDirection: "row",
+    alignItems: "flex-start",
     gap: 10,
   },
   tipText: {
@@ -1502,16 +1965,16 @@ const tourCompleteStyles = StyleSheet.create({
     lineHeight: 19,
   },
   ctaButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'stretch',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "stretch",
     borderRadius: 14,
     paddingVertical: 14,
   },
   ctaLabel: {
-    color: '#FFFFFF',
-    fontWeight: '700',
+    color: "#FFFFFF",
+    fontWeight: "700",
     fontSize: 15,
   },
 });

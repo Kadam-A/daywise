@@ -494,6 +494,10 @@ export async function fetchGoogleCalendarEvents(
     const taskEventIds = new Set((taskEventRows || []).map((t: any) => t.google_event_id));
     const externalEvents = calendarEvents.filter((e) => !taskEventIds.has(e.google_event_id));
 
+    // Abort if user disconnected while this fetch was in flight
+    const stillConnected = await isGoogleCalendarConnected();
+    if (!stillConnected) return [];
+
     // Delete-then-upsert within the sync window so orphaned rows (events deleted
     // from Google) are automatically removed on every full sync.
     await supabase

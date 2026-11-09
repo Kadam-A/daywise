@@ -31,6 +31,7 @@ import { useAppColors } from "@/contexts/ThemeContext";
 import { useGuidedTour } from "@/contexts/GuidedTourContext";
 import { useSubscription } from "@/contexts/SubscriptionContext";
 import { startFreeTrial } from "@/lib/purchases";
+import { requestNotificationPermissions } from "@/lib/notifications";
 
 // ─── Feature Screens ──────────────────────────────────────────────────────────
 
@@ -514,7 +515,7 @@ export default function OnboardingScreen() {
         return;
       }
       await trackOnboardingCompleted();
-      goNext();
+      router.replace("/(auth)/first-task");
     } catch (err) {
       console.error("[Onboarding Error]", err);
       setError(err instanceof Error ? err.message : "Failed to save profile");
@@ -548,6 +549,7 @@ export default function OnboardingScreen() {
 
   const handleChooseTour = async () => {
     setChoosingTour(true);
+    await requestNotificationPermissions();
     await advanceTour("tour_welcome");
     await createDemoTasks();
     router.replace("/(tabs)/home");
@@ -555,11 +557,13 @@ export default function OnboardingScreen() {
 
   const handleChooseExplore = async () => {
     setChoosingExplore(true);
+    await requestNotificationPermissions();
     await skipTour();
     router.replace("/(tabs)/home");
   };
 
   const handleSkipTrial = async () => {
+    await requestNotificationPermissions();
     await skipTour();
     router.replace("/(tabs)/home");
   };
@@ -763,9 +767,9 @@ export default function OnboardingScreen() {
     );
   }
 
-  // ── Step 11: Trial opt-in / choice ──────────────────────────────────────────
+  // ── Step 11: Trial opt-in / choice (DISABLED — new flow routes to first-task screen) ──
   // Phase 2: Trial started — choose experience
-  if (trialStarted) {
+  if (false && trialStarted) {
     return (
       <SafeAreaView style={[styles.container, { backgroundColor: appColors.surface }]}>
         <Confetti />
@@ -839,8 +843,8 @@ export default function OnboardingScreen() {
     );
   }
 
-  // Phase 1: Trial pitch
-  return (
+  // Phase 1: Trial pitch (DISABLED — handled by TrialBottomSheet post-tooltips)
+  if (false) return (
     <SafeAreaView style={[styles.container, { backgroundColor: appColors.surface }]}>
       <ScrollView contentContainerStyle={{ padding: 28, paddingTop: 48, flexGrow: 1 }} showsVerticalScrollIndicator={false}>
         <View style={{ alignItems: "center", marginBottom: 32 }}>
@@ -911,6 +915,8 @@ export default function OnboardingScreen() {
       </ScrollView>
     </SafeAreaView>
   );
+
+  return null;
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────────────

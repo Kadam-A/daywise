@@ -11,6 +11,7 @@ export default function AuthLayout() {
       <Stack.Screen name="login" />
       <Stack.Screen name="verify-email" />
       <Stack.Screen name="onboarding" />
+      <Stack.Screen name="first-task" />
     </Stack>
   );
 }

@@ -505,7 +505,6 @@ CONTEXT-AWARE REASON RULES — THIS IS WHAT MAKES THE FEEDBACK FEEL REAL:
 - COGNITIVE LOAD WARNING: If a slot would place a heavy task (deep work, strategy, complex writing) immediately after a demanding meeting or another deep-work task OF A DIFFERENT TYPE, flag this honestly: "Back-to-back deep work after a strategy session — you may be mentally drained by this point". Don't pretend the slot is great if the surrounding context makes it risky.
 - TASK BATCHING OPPORTUNITY: When the user's schedule already contains tasks of the SAME TYPE (e.g. multiple code reviews, several admin items, multiple client emails), actively recommend the same day and call out the batching benefit: "Batching with your other review tasks on Friday — keeps you in the same context without switching gears". A day with 5 code reviews is a perfect day to add a 6th — it's not overload, it's flow.`;
 
-  const now = new Date();
   const currentLocalTime = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,
     weekday: "long", month: "short", day: "numeric",

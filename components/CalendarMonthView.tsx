@@ -11,7 +11,7 @@
 import React, { useMemo } from "react";
 import { View, StyleSheet, Pressable } from "react-native";
 import { Text } from "react-native-paper";
-import { Task } from "@/lib/types";
+import { Task, CalendarEvent } from "@/lib/types";
 import { useAppColors } from "@/contexts/ThemeContext";
 import {
   format,
@@ -40,6 +40,7 @@ const COLORS = {
 interface CalendarMonthViewProps {
   month: Date;
   tasks: Task[];
+  calendarEvents?: CalendarEvent[];
   selectedDate: Date;
   onSelectDate: (date: Date) => void;
 }
@@ -49,6 +50,7 @@ const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 export default function CalendarMonthView({
   month,
   tasks,
+  calendarEvents = [],
   selectedDate,
   onSelectDate,
 }: CalendarMonthViewProps) {
@@ -77,12 +79,14 @@ export default function CalendarMonthView({
     return weeks;
   }, [month]);
 
-  // Count tasks per day
-  const getTaskCount = (date: Date): number => {
-    return tasks.filter((task) => {
-      if (!task.scheduled_start) return false;
-      return isSameDay(parseISO(task.scheduled_start), date);
-    }).length;
+  // Count tasks and events per day, capped at 3 dots total
+  const getDaySources = (date: Date): { taskCount: number; eventCount: number } => {
+    const taskCount = tasks.filter(t => t.scheduled_start && isSameDay(parseISO(t.scheduled_start), date)).length;
+    const eventCount = calendarEvents.filter(e => !e.all_day && isSameDay(parseISO(e.start_time), date)).length;
+    // Cap: tasks fill first, events fill remaining slots up to 3 total
+    const cappedTasks = Math.min(taskCount, 3);
+    const cappedEvents = Math.min(eventCount, 3 - cappedTasks);
+    return { taskCount: cappedTasks, eventCount: cappedEvents };
   };
 
   return (
@@ -103,7 +107,8 @@ export default function CalendarMonthView({
             const isSelected = isSameDay(day, selectedDate);
             const isCurrentDay = isToday(day);
             const isCurrentMonth = isSameMonth(day, month);
-            const taskCount = getTaskCount(day);
+            const { taskCount, eventCount } = getDaySources(day);
+            const totalDots = taskCount + eventCount;
 
             return (
               <Pressable
@@ -127,49 +132,26 @@ export default function CalendarMonthView({
                   {format(day, "d")}
                 </Text>
 
-                {/* Task dots */}
-                {taskCount > 0 && (
+                {totalDots > 0 && (
                   <View style={styles.dotsContainer}>
-                    {taskCount <= 3 ? (
-                      Array.from({ length: taskCount }, (_, i) => (
-                        <View
-                          key={i}
-                          style={[
-                            styles.dot,
-                            { backgroundColor: COLORS.primary },
-                            isSelected && { backgroundColor: "#FFFFFF" },
-                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
-                          ]}
-                        />
-                      ))
-                    ) : (
-                      <>
-                        <View
-                          style={[
-                            styles.dot,
-                            { backgroundColor: COLORS.primary },
-                            isSelected && { backgroundColor: "#FFFFFF" },
-                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
-                          ]}
-                        />
-                        <View
-                          style={[
-                            styles.dot,
-                            { backgroundColor: COLORS.primary },
-                            isSelected && { backgroundColor: "#FFFFFF" },
-                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
-                          ]}
-                        />
-                        <View
-                          style={[
-                            styles.dot,
-                            { backgroundColor: COLORS.primary },
-                            isSelected && { backgroundColor: "#FFFFFF" },
-                            !isCurrentMonth && { backgroundColor: COLORS.textTertiary },
-                          ]}
-                        />
-                      </>
-                    )}
+                    {Array.from({ length: taskCount }, (_, i) => (
+                      <View
+                        key={`t${i}`}
+                        style={[
+                          styles.dot,
+                          { backgroundColor: isSelected ? "#FFFFFF" : (!isCurrentMonth ? COLORS.textTertiary : COLORS.primary) },
+                        ]}
+                      />
+                    ))}
+                    {Array.from({ length: eventCount }, (_, i) => (
+                      <View
+                        key={`e${i}`}
+                        style={[
+                          styles.dot,
+                          { backgroundColor: isSelected ? "#FFFFFF" : (!isCurrentMonth ? COLORS.textTertiary : "#4285F4") },
+                        ]}
+                      />
+                    ))}
                   </View>
                 )}
               </Pressable>
