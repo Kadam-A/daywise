@@ -6,6 +6,12 @@ A React Native / Expo mobile app that schedules tasks around your personality an
 
 The app ships under the name **DayWise** (see [app.config.js](app.config.js)); **TailoredTime** is the original project name and is still used in the code and docs.
 
+<p align="center">
+  <img src="docs/screenshots/home.jpg" width="250" alt="Home screen with next-up task" />
+  <img src="docs/screenshots/new-task.jpg" width="250" alt="New task: pick a time or AI schedule" />
+  <img src="docs/screenshots/ai-ranked-slots.jpg" width="250" alt="AI-ranked time slots with reasons" />
+</p>
+
 ---
 
 ## What it does
